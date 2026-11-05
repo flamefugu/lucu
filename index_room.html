@@ -1,0 +1,919 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#20232b">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>Ruangan MMD</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #20232b; overflow: hidden; font-family: system-ui, sans-serif; }
+  canvas { display: block; }
+  #ui { position: fixed; left: 10px; top: calc(10px + env(safe-area-inset-top, 0px)); right: 10px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+        color: #fff; font-size: 13px; background: rgba(0,0,0,.45); padding: 8px 10px; border-radius: 10px; max-width: 460px; }
+  #ui input[type=range] { width: 120px; }
+  #tg { position: fixed; right: 10px; top: 10px; z-index: 5; opacity: .6; }
+  #msg { position: fixed; left: 0; right: 0; bottom: 12px; text-align: center; color: #cfd3dc; font-size: 13px; pointer-events: none; }
+  #bubble { position: fixed; left: 50%; top: 40%; transform: translate(-50%, -100%); z-index: 4; pointer-events: none; opacity: 0; transition: opacity .25s;
+            background: #fff; color: #23262e; padding: 7px 14px; border-radius: 16px; font-size: 15px; max-width: 70vw; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,.35); }
+  #bubble::after { content: ""; position: absolute; left: 50%; bottom: -7px; margin-left: -7px; border: 7px solid transparent; border-bottom: 0; border-top-color: #fff; }
+  button { padding: 4px 10px; border-radius: 6px; border: 0; }
+</style>
+</head>
+<body>
+<button id="tg">☰</button>
+<div id="ui">
+  <label>1) Tambah file (pmx, lalu isi folder tex, lalu isi folder spa): <input id="files" type="file" multiple></label>
+  <button id="go">2) Muat model</button>
+  <label>Gerakan (.vmd): <input id="vmd" type="file" accept=".vmd"></label>
+  <label>Sudut lengan <input id="arm" type="range" min="-1.6" max="1.6" step="0.05" value="0.9"></label>
+  <label><input id="idle" type="checkbox" checked> Idle</label>
+  <button id="stop">Stop VMD</button>
+  <label><input id="autolife" type="checkbox" checked> Hidup sendiri (lapar, haus, tidur)</label>
+  <div id="stat" style="width:100%"></div>
+  <button id="clear">Hapus model tersimpan</button>
+  <label><input id="auto" type="checkbox" checked> Jalan sendiri</label>
+  <label><input id="follow" type="checkbox" checked> Ikuti jari (matikan untuk putar kamera)</label>
+  <label><input id="legflip" type="checkbox"> Balik arah kaki</label>
+</div>
+<div id="bubble"></div>
+<div id="msg">Langkah 1: pilih Xavier.pmx. Ulangi untuk isi folder tex dan spa. Langkah 2: Muat model.</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { MMDLoader } from 'three/addons/loaders/MMDLoader.js';
+import { MMDAnimationHelper } from 'three/addons/animation/MMDAnimationHelper.js';
+
+const msg = document.getElementById('msg');
+
+// Renderer, scene, camera
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x20232b);
+const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.1, 2000);
+camera.position.set(0, 14, 45);
+
+scene.add(new THREE.AmbientLight(0xffffff, 1.6));
+const dir = new THREE.DirectionalLight(0xffffff, 1.2);
+dir.position.set(-1, 2, 2);
+scene.add(dir);
+const grid = new THREE.GridHelper(40, 20, 0x555a66, 0x333845);
+scene.add(grid);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 10, 0);
+controls.update();
+
+// Texture path fix: model expects tex\*.png and spa\*.bmp,
+// but files are in one folder and some are .jpg. Flatten + remap.
+const fileMap = {};   // nama file (huruf kecil) -> blob URL
+const manager = new THREE.LoadingManager();
+manager.setURLModifier((url) => {
+  if (url.startsWith('data:')) return url;
+  let name = decodeURIComponent(url.split(/[\\/]/).pop()).toLowerCase();
+  if (fileMap[name]) return fileMap[name];
+  const alt = name.replace(/\.bmp$/, '.jpg');
+  if (fileMap[alt]) return fileMap[alt];
+  return url;
+});
+
+const loader = new MMDLoader(manager);
+const helper = new MMDAnimationHelper({ afterglow: 2.0 });
+const clock = new THREE.Clock();
+
+let mesh = null, bones = {}, morph = {}, vmdActive = false;
+
+function loadModel(pmxUrl) {
+loader.load(pmxUrl, (m) => {
+  mesh = m;
+  scene.add(mesh);
+  helper.add(mesh, { physics: false });   // pasang helper tanpa animasi dulu
+  const find = (n) => mesh.skeleton.getBoneByName(n);
+  bones = {
+    head: find('頭'), neck: find('首'), upper: find('上半身'),
+    lArm: find('左腕'), rArm: find('右腕'),
+    lLeg: find('左足'), rLeg: find('右足'), lKnee: find('左ひざ'), rKnee: find('右ひざ'),
+    lAnk: find('左足首'), rAnk: find('右足首'),
+    // model ini memakai tulang "D" untuk kaki yang terlihat
+    lLegD: find('左足D'), rLegD: find('右足D'), lKneeD: find('左ひざD'), rKneeD: find('右ひざD'),
+    lAnkD: find('左足首D'), rAnkD: find('右足首D'),
+    lElbow: find('左ひじ'), rElbow: find('右ひじ'), upper2: find('上半身2'),
+  };
+  morph = mesh.morphTargetDictionary || {};
+  // sesuaikan kamera dengan tinggi model
+  const box = new THREE.Box3().setFromObject(mesh);
+  const h = box.max.y - box.min.y;
+  mesh.position.set(0, 0, 0);
+  mesh.rotation.order = 'YXZ';   // putar badan (Y) dulu, baru condong ke depan (X)
+  mesh.rotation.y = 0;
+  // tinggi pergelangan kaki saat berdiri = acuan "menapak lantai"
+  mesh.updateMatrixWorld(true);
+  walk.ground = null;
+  const gL = bones.lAnkD || bones.lAnk, gR = bones.rAnkD || bones.rAnk;
+  if (gL && gR) {
+    const v = new THREE.Vector3();
+    walk.ground = Math.min(gL.getWorldPosition(v).y, gR.getWorldPosition(v).y);
+  }
+  buildRoom(h);
+  msg.textContent = 'Dia jalan sendiri. Sentuh lantai: dia datang ke jarimu. Ketuk dia untuk menyapa. ☰ = panel.';
+  document.getElementById('ui').style.display = 'none';
+  setTimeout(() => { msg.textContent = ''; }, 6000);
+}, (e) => {
+  if (e.lengthComputable) msg.textContent = 'Memuat… ' + Math.round(e.loaded / e.total * 100) + '%';
+}, (err) => {
+  console.error(err);
+  msg.textContent = 'Gagal memuat model: ' + (err && err.message ? err.message : err);
+});
+}
+
+let pmxUrl = null, nFiles = 0;
+document.getElementById('files').addEventListener('change', (ev) => {
+  for (const f of ev.target.files) {
+    const u = URL.createObjectURL(f);
+    fileMap[f.name.toLowerCase()] = u;
+    dbPut(f.name.toLowerCase(), f).catch(() => {});   // simpan di browser ini saja
+    if (/\.pmx$/i.test(f.name)) pmxUrl = u + '#.pmx';   // MMDLoader butuh ekstensi di URL
+    nFiles++;
+  }
+  ev.target.value = '';   // supaya bisa pilih lagi dari folder lain
+  msg.textContent = nFiles + ' file terpilih' + (pmxUrl ? ' (pmx sudah ada)' : ' (pmx belum ada)') +
+    '. Tambah dari folder lain, atau tekan "Muat model".';
+});
+
+document.getElementById('go').onclick = () => {
+  if (!pmxUrl) { msg.textContent = 'Pilih dulu Xavier.pmx.'; return; }
+  if (mesh) { scene.remove(mesh); helper.remove(mesh); mesh = null; }
+  msg.textContent = 'Memuat model…';
+  loadModel(pmxUrl);
+};
+
+// Load VMD dari file picker
+document.getElementById('vmd').addEventListener('change', (ev) => {
+  const f = ev.target.files[0];
+  if (!f || !mesh) return;
+  const url = URL.createObjectURL(f) + '#.vmd';
+  msg.textContent = 'Memuat gerakan…';
+  loader.loadAnimation(url, mesh, (clip) => {
+    helper.remove(mesh);
+    helper.add(mesh, { animation: clip, physics: false });
+    vmdActive = true;
+    document.getElementById('idle').checked = false;
+    msg.textContent = 'Gerakan berjalan.';
+  }, undefined, (e) => { console.error(e); msg.textContent = 'Gagal memuat VMD.'; });
+});
+
+document.getElementById('stop').onclick = () => {
+  if (!mesh) return;
+  helper.remove(mesh);
+  mesh.skeleton.pose();
+  helper.add(mesh, { physics: false });
+  vmdActive = false;
+  document.getElementById('idle').checked = true;
+};
+
+// Animasi idle sederhana (napas, goyang kepala, kedip)
+const armSlider = document.getElementById('arm');
+const idleBox = document.getElementById('idle');
+let blinkT = 0;
+
+// Angguk: ubah ke -1 kalau kepala malah mendongak
+const NOD_DIR = 1;
+let nodStart = -1;               // waktu mulai angguk (detik)
+const NOD_TIMES = 2;             // berapa kali mengangguk
+const NOD_SPEED = 2.2;           // detik per angguk
+
+function nodAmount(t) {
+  if (nodStart < 0) return 0;
+  const p = (t - nodStart) / NOD_SPEED;      // progres dalam satuan angguk
+  if (p >= NOD_TIMES) { nodStart = -1; return 0; }
+  // 0 -> 1 -> 0 halus per angguk
+  return Math.pow(Math.sin(Math.PI * (p % 1)), 2);
+}
+
+// ---------- Interaktif: kepala ikut jari, ketuk model = menyapa ----------
+const followBox = document.getElementById('follow');
+const LOOK_X_DIR = 1;   // balik ke -1 kalau kepala menoleh ke arah yang berlawanan
+const LOOK_Y_DIR = 1;   // balik ke -1 kalau naik-turunnya terbalik
+let ptr = { x: 0, y: 0, last: -99 };       // posisi sentuhan (-1..1) dan waktu terakhir
+let look = { x: 0, y: 0 };                 // arah pandang yang dihaluskan
+let wander = { x: 0, y: 0, next: 0 };      // arah acak saat tidak disentuh
+
+function setControls() {
+  // "Ikuti jari" nyala: 1 jari = Xavier jalan, 2 jari = putar & zoom kamera. Mati: 1 jari putar, 2 jari geser/zoom.
+  const f = followBox.checked;
+  controls.enableRotate = true; controls.enablePan = !f; controls.enableZoom = true;
+  controls.touches = { ONE: f ? -1 : THREE.TOUCH.ROTATE, TWO: f ? THREE.TOUCH.DOLLY_ROTATE : THREE.TOUCH.DOLLY_PAN };
+  controls.mouseButtons = { LEFT: f ? -1 : THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+}
+followBox.addEventListener('change', setControls);
+setControls();
+
+const ray = new THREE.Raycaster();
+const ndc = (e) => new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+function floorPoint(e) {
+  if (!floorMesh) return null;
+  ray.setFromCamera(ndc(e), camera);
+  const h = ray.intersectObject(floorMesh);
+  return h.length ? h[0].point : null;
+}
+function onModel(e) {
+  if (!mesh) return false;
+  ray.setFromCamera(ndc(e), camera);
+  return ray.intersectObject(mesh, true).length > 0;
+}
+const autoBox = document.getElementById('auto');
+const auto = { wait: 2, lastTouch: -99 };
+let downAt = null, pressing = false, downOnModel = false;
+
+function setPtr(e) {
+  ptr.x = (e.clientX / innerWidth) * 2 - 1;
+  ptr.y = (e.clientY / innerHeight) * 2 - 1;
+  ptr.last = clock.elapsedTime;
+  auto.lastTouch = clock.elapsedTime;
+}
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  if (!e.isPrimary) { pressing = false; downAt = null; return; }   // jari kedua = gerakan kamera
+  setPtr(e);
+  downAt = { x: e.clientX, y: e.clientY, t: performance.now() };
+  pressing = true;
+  downOnModel = onModel(e);
+  // sentuh lantai -> dia berjalan ke jari
+  if (!downOnModel && followBox.checked && !vmdActive) { const p = floorPoint(e); if (p) walkTo(p, true, false); }
+});
+renderer.domElement.addEventListener('pointermove', (e) => {
+  if (!e.isPrimary) return;
+  setPtr(e);
+  // geser jari -> dia terus mengikuti
+  if (pressing && !downOnModel && followBox.checked && !vmdActive) { const p = floorPoint(e); if (p) walkTo(p, true, true); }
+});
+function release(e, cancelled) {
+  const wasDown = downAt; pressing = false; downAt = null;
+  if (cancelled || !wasDown || !mesh) return;
+  const moved = Math.hypot(e.clientX - wasDown.x, e.clientY - wasDown.y);
+  const quick = performance.now() - wasDown.t < 400;
+  if (moved > 10 || !quick) return;
+  if (downOnModel) { greet(); return; }
+  if (!followBox.checked && !vmdActive) { const p = floorPoint(e); if (p) walkTo(p, false, false); }
+}
+renderer.domElement.addEventListener('pointerup', (e) => release(e, false));
+renderer.domElement.addEventListener('pointercancel', (e) => release(e, true));
+
+// Sapaan = angguk + lambaikan tangan kanan
+const WAVE_DUR = 2.6;
+let waveStart = -1;
+function greet(quiet = false) {
+  if (vmdActive || sl.active || life.lock) return;
+  idleBox.checked = true;
+  nodStart = clock.elapsedTime;
+  waveStart = clock.elapsedTime;
+  if (!quiet) speak(PHRASES[Math.floor(Math.random() * PHRASES.length)]);
+}
+
+function waveAmount(t) {
+  if (waveStart < 0) return 0;
+  const p = (t - waveStart) / WAVE_DUR;
+  if (p >= 1) { waveStart = -1; return 0; }
+  return Math.min(1, Math.sin(Math.PI * p) * 2.2);   // naik cepat, turun pelan
+}
+
+function idle(t, dt) {
+  const { head, neck, upper, lArm, rArm } = bones;
+  const nod = nodAmount(t) * NOD_DIR;
+
+  // arah pandang: ikut jari kalau baru disentuh, kalau tidak melirik acak pelan
+  let tx = 0, ty = 0;
+  if (followBox.checked && t - ptr.last < 4) { tx = ptr.x; ty = ptr.y * 0.6; }
+  else {
+    if (t > wander.next) { wander.x = (Math.random() - 0.5) * 0.9; wander.y = (Math.random() - 0.5) * 0.4; wander.next = t + 2 + Math.random() * 4; }
+    tx = wander.x; ty = wander.y;
+  }
+  const k = 1 - Math.exp(-6 * dt);
+  look.x += (tx - look.x) * k;
+  look.y += (ty - look.y) * k;
+  const lx = look.x * LOOK_X_DIR, ly = look.y * LOOK_Y_DIR;
+
+  if (upper) upper.rotation.x = Math.sin(t * 1.6) * 0.02 + nod * 0.08;
+  if (neck) { neck.rotation.y = lx * 0.25; neck.rotation.x = ly * 0.1 + nod * 0.15; }
+  if (head) { head.rotation.y = lx * 0.45; head.rotation.x = ly * 0.25 + Math.sin(t * 0.9) * 0.02 + nod * 0.3; }
+
+  const a = parseFloat(armSlider.value);
+  const w = waveAmount(t);
+  if (lArm) lArm.rotation.z = a;
+  if (rArm) rArm.rotation.z = -a + w * (a + 0.9) + Math.sin(t * 11) * 0.12 * w;
+
+  const bi = morph['まばたき'];
+  if (bi !== undefined) {
+    blinkT = (t % 4);
+    mesh.morphTargetInfluences[bi] = blinkT > 3.8 ? 1 : 0;
+  }
+}
+
+// ---------- Ruangan ----------
+let room = null, floorMesh = null, shadowMesh = null, marker = null, H = 18, HALF = 54;
+const obstacles = [];
+let spots = {}, foodMesh = null, glassMesh = null;   // kotak penghalang {x0,x1,z0,z1}
+
+function woodTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const g = c.getContext('2d');
+  for (let i = 0; i < 4; i++) {
+    g.fillStyle = ['#c9a679', '#bf9a6c', '#d2b087', '#c4a074'][i];
+    g.fillRect(0, i * 64, 256, 64);
+    g.fillStyle = 'rgba(80,50,20,.35)'; g.fillRect(0, i * 64, 256, 2);
+    g.fillRect(((i * 97) % 200) + 20, i * 64, 2, 64);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+function blobTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d');
+  const gr = g.createRadialGradient(64, 64, 4, 64, 64, 62);
+  gr.addColorStop(0, 'rgba(0,0,0,.5)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+  return new THREE.CanvasTexture(c);
+}
+function addBox(parent, w, h, d, color, x, y, z, solid) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshLambertMaterial({ color }));
+  m.position.set(x, y + h / 2, z);
+  parent.add(m);
+  if (solid) obstacles.push({ x0: x - w / 2, x1: x + w / 2, z0: z - d / 2, z1: z + d / 2 });
+  return m;
+}
+
+function buildRoom(h) {
+  if (room) scene.remove(room);
+  if (shadowMesh) scene.remove(shadowMesh);
+  if (marker) scene.remove(marker);
+  grid.visible = false;
+  obstacles.length = 0;
+  H = h; HALF = h * 3;
+  const S = HALF, WH = h * 2.7;
+  room = new THREE.Group();
+
+  // lantai
+  const tex = woodTexture(); tex.repeat.set(6, 6);
+  floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(S * 2, S * 2), new THREE.MeshLambertMaterial({ map: tex }));
+  floorMesh.rotation.x = -Math.PI / 2;
+  room.add(floorMesh);
+
+  // dinding (hanya terlihat dari dalam)
+  const wallMat = new THREE.MeshLambertMaterial({ color: 0xefe4d6 });
+  const back = new THREE.Mesh(new THREE.PlaneGeometry(S * 2, WH), wallMat);
+  back.position.set(0, WH / 2, -S);
+  const left = new THREE.Mesh(new THREE.PlaneGeometry(S * 2, WH), wallMat);
+  left.position.set(-S, WH / 2, 0); left.rotation.y = Math.PI / 2;
+  const right = new THREE.Mesh(new THREE.PlaneGeometry(S * 2, WH), wallMat);
+  right.position.set(S, WH / 2, 0); right.rotation.y = -Math.PI / 2;
+  room.add(back, left, right);
+  addBox(room, S * 2, h * 0.12, 0.3, 0xc9b79f, 0, 0, -S + 0.15, false);   // list bawah
+
+  // jendela di dinding belakang
+  addBox(room, h * 1.7, h * 1.2, 0.4, 0x8b6b4a, h * 1.5, h * 1.0, -S + 0.2, false);
+  const glass = new THREE.Mesh(new THREE.PlaneGeometry(h * 1.5, h * 1.0), new THREE.MeshBasicMaterial({ color: 0xbfe4ff }));
+  glass.position.set(h * 1.5, h * 1.1 + h * 0.5, -S + 0.45);
+  room.add(glass);
+
+  // karpet
+  const rug = new THREE.Mesh(new THREE.CircleGeometry(h * 1.3, 40), new THREE.MeshLambertMaterial({ color: 0xf0b8c4 }));
+  rug.rotation.x = -Math.PI / 2; rug.position.set(0, 0.05, h * 0.4);
+  room.add(rug);
+
+  // kasur (pojok kiri belakang)
+  const bx = -S + h * 1.0, bz = -S + h * 1.45;
+  addBox(room, h * 1.9, h * 0.35, h * 2.8, 0x8b5e3c, bx, 0, bz, true);
+  addBox(room, h * 1.8, h * 0.2, h * 2.7, 0xf4f1ec, bx, h * 0.35, bz, false);
+  addBox(room, h * 1.5, h * 0.12, h * 0.5, 0xffffff, bx, h * 0.55, bz - h * 1.0, false);
+  addBox(room, h * 1.8, h * 0.08, h * 1.3, 0x8fb3d9, bx, h * 0.55, bz + h * 0.5, false);
+
+  // rak buku (dinding belakang, tengah)
+  addBox(room, h * 1.5, h * 1.9, h * 0.45, 0x7a5233, -h * 0.2, 0, -S + h * 0.3, true);
+  [0.35, 0.8, 1.25, 1.6].forEach((yy, i) => addBox(room, h * 1.3, h * 0.28, h * 0.1, [0xd26a6a, 0x6a9bd2, 0x7dc47d, 0xd9c04a][i], -h * 0.2, h * yy, -S + h * 0.55, false));
+
+  // meja (dinding kanan)
+  addBox(room, h * 1.0, h * 0.85, h * 2.0, 0xa77b52, S - h * 0.6, 0, -h * 0.3, true);
+  addBox(room, h * 0.5, h * 0.55, h * 0.5, 0xdddddd, S - h * 0.55, h * 0.85, -h * 0.3, false);   // laptop/monitor kecil
+
+  // lampu berdiri (kanan depan)
+  const lx = S - h * 0.5, lz = h * 1.8;
+  addBox(room, h * 0.12, h * 1.6, h * 0.12, 0x555555, lx, 0, lz, true);
+  const shade = new THREE.Mesh(new THREE.SphereGeometry(h * 0.3, 16, 12), new THREE.MeshBasicMaterial({ color: 0xffe2a8 }));
+  shade.position.set(lx, h * 1.75, lz); room.add(shade);
+  const pl = new THREE.PointLight(0xffd9a8, h * h * 3, 0, 2);
+  pl.position.set(lx - h * 0.3, h * 1.7, lz); room.add(pl);
+
+  // tanaman (kiri depan)
+  addBox(room, h * 0.35, h * 0.4, h * 0.35, 0xc57f5a, -S + h * 0.5, 0, h * 1.8, true);
+  const leaf = new THREE.Mesh(new THREE.SphereGeometry(h * 0.35, 14, 10), new THREE.MeshLambertMaterial({ color: 0x5fae6a }));
+  leaf.position.set(-S + h * 0.5, h * 0.75, h * 1.8); room.add(leaf);
+
+  // meja kecil di bawah jendela: makanan & minuman
+  const tx = h * 1.45, tz = -S + h * 0.4;
+  addBox(room, h * 1.1, h * 0.5, h * 0.5, 0xb98b5e, tx, 0, tz, true);
+  addBox(room, h * 0.34, h * 0.03, h * 0.34, 0xffffff, tx - h * 0.28, h * 0.5, tz, false);
+  foodMesh = addBox(room, h * 0.22, h * 0.12, h * 0.22, 0xe7a35a, tx - h * 0.28, h * 0.53, tz, false);
+  glassMesh = addBox(room, h * 0.12, h * 0.2, h * 0.12, 0x9fd6f2, tx + h * 0.28, h * 0.5, tz, false);
+  [[foodMesh, h * 0.06], [glassMesh, h * 0.1]].forEach(([m, hh]) => { m.userData.y0 = m.position.y; m.userData.hh = hh; });
+  spots = {
+    food:  { x: tx - h * 0.28, z: -S + h * 1.0, face: Math.PI },
+    water: { x: tx + h * 0.28, z: -S + h * 1.0, face: Math.PI },
+    bed:   { x: bx, z: bz + h * 1.95, face: 0, lieX: bx, lieZ: bz + h * 0.05, lieY: h * 0.66 },
+  };
+
+  scene.add(room);
+
+  // bayangan bulat di bawah karakter & penanda tujuan
+  shadowMesh = new THREE.Mesh(new THREE.CircleGeometry(h * 0.5, 24),
+    new THREE.MeshBasicMaterial({ map: blobTexture(), transparent: true, depthWrite: false }));
+  shadowMesh.rotation.x = -Math.PI / 2; shadowMesh.position.y = 0.12;
+  scene.add(shadowMesh);
+  marker = new THREE.Mesh(new THREE.RingGeometry(h * 0.18, h * 0.24, 28),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8, depthWrite: false }));
+  marker.rotation.x = -Math.PI / 2; marker.position.y = 0.15; marker.visible = false;
+  scene.add(marker);
+
+  // kamera
+  controls.target.set(0, h * 0.55, 0);
+  const k = Math.max(1, 0.95 / camera.aspect);   // layar HP tegak: mundurkan kamera supaya seluruh ruangan terlihat
+  camera.position.set(0, h * 1.9 * Math.min(k, 1.8), h * 4.6 * k);
+  controls.minDistance = h * 0.8; controls.maxDistance = h * 14;
+  controls.maxPolarAngle = Math.PI / 2 - 0.03;
+  controls.update();
+}
+
+// ---------- Berjalan ----------
+const walk = { active: false, tx: 0, tz: 0, phase: 0, blend: 0, fast: false, ground: null };
+const legFlip = document.getElementById('legflip');
+const PAD = 0.3;   // jarak aman dari perabot (kali tinggi model)
+
+function blocked(x, z) {
+  const p = H * PAD;
+  if (Math.abs(x) > HALF - H * 0.4 || Math.abs(z) > HALF - H * 0.4) return true;
+  return obstacles.some(o => x > o.x0 - p && x < o.x1 + p && z > o.z0 - p && z < o.z1 + p);
+}
+function walkTo(pt, fast = false, silent = false, force = false) {
+  if (!mesh || vmdActive || sl.active || (life.lock && !force)) return;
+  if (blocked(pt.x, pt.z)) {
+    if (!silent) msg.textContent = 'Di situ ada perabot atau dinding, coba bagian lantai lain.';
+    return;
+  }
+  walk.active = true; walk.fast = fast; walk.tx = pt.x; walk.tz = pt.z;
+  marker.position.set(pt.x, 0.15, pt.z); marker.visible = !silent || fast;
+}
+
+function pickRandomSpot() {
+  if (!mesh) return;
+  for (let i = 0; i < 14; i++) {
+    const x = (Math.random() * 2 - 1) * (HALF - H * 0.6), z = (Math.random() * 2 - 1) * (HALF - H * 0.6);
+    if (blocked(x, z)) continue;
+    if (Math.hypot(x - mesh.position.x, z - mesh.position.z) < H * 0.8) continue;
+    walkTo({ x, z }, false, true);
+    marker.visible = false;
+    return;
+  }
+}
+
+// Jalan-jalan sendiri: diam sebentar, lalu ke tempat acak, kadang menyapa
+function updateAuto(t, dt) {
+  if (!autoBox.checked || vmdActive || walk.active || sl.active || life.lock) { auto.wait = 1.5 + Math.random() * 4; return; }
+  if (t - auto.lastTouch < 5) return;            // baru disentuh -> tunggu dulu
+  auto.wait -= dt;
+  if (auto.wait > 0) return;
+  auto.wait = 1.5 + Math.random() * 4;
+  const r = Math.random();
+  if (r < 0.12) greet(true);
+  else if (r < 0.2) nodStart = t;
+  else if (r < 0.24 && lifeBox.checked) startStretch();
+  else pickRandomSpot();
+}
+
+function updateWalk(dt) {
+  if (!mesh) return;
+  const p = mesh.position;
+  if (walk.active) {
+    const dx = walk.tx - p.x, dz = walk.tz - p.z, dist = Math.hypot(dx, dz);
+    if (dist < H * 0.08) { walk.active = false; walk.fast = false; marker.visible = false; }
+    else {
+      // putar badan ke arah tujuan
+      const want = Math.atan2(dx, dz);
+      let diff = want - mesh.rotation.y;
+      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+      mesh.rotation.y += diff * (1 - Math.exp(-9 * dt));
+      // maju kalau sudah menghadap kira-kira ke tujuan
+      if (Math.abs(diff) < 0.9) {
+        const step = Math.min(dist, H * (walk.fast ? 1.3 : 0.8) * dt);
+        let nx = p.x + dx / dist * step, nz = p.z + dz / dist * step;
+        if (blocked(nx, nz)) {
+          if (!blocked(nx, p.z)) nz = p.z;
+          else if (!blocked(p.x, nz)) nx = p.x;
+          else { nx = p.x; nz = p.z; walk.active = false; marker.visible = false; }
+        }
+        const moved = Math.hypot(nx - p.x, nz - p.z);
+        p.x = nx; p.z = nz;
+        walk.phase += moved * (Math.PI * 2 / (H * 0.6));
+      }
+    }
+  }
+  walk.blend += ((walk.active ? 1 : 0) - walk.blend) * (1 - Math.exp(-10 * dt));
+  if (walk.blend < 0.001 && !walk.active) walk.blend = 0;
+
+  // ayunan kaki & tangan (kiri-kanan bergantian)
+  const { lLeg, rLeg, lKnee, rKnee, lAnk, rAnk, upper, lArm, rArm } = bones;
+  const LEG = legFlip.checked ? -1 : 1, b = walk.blend;
+  // putar tulang biasa DAN tulang "D" (yang benar-benar menggerakkan kaki di model ini)
+  const leg = (hips, knees, anks, ph) => {
+    const h = LEG * Math.sin(ph) * 0.6 * b;
+    const k = -LEG * Math.max(0, Math.cos(ph)) * 0.8 * b;
+    const an = -(h + k) * 0.7;                    // telapak tetap rata
+    hips.forEach(x => { if (x) x.rotation.x = h; });
+    knees.forEach(x => { if (x) x.rotation.x = k; });
+    anks.forEach(x => { if (x) x.rotation.x = an; });
+  };
+  leg([lLeg, bones.lLegD], [lKnee, bones.lKneeD], [lAnk, bones.lAnkD], walk.phase);
+  leg([rLeg, bones.rLegD], [rKnee, bones.rKneeD], [rAnk, bones.rAnkD], walk.phase + Math.PI);
+  const swing = LEG * Math.sin(walk.phase) * 0.55 * b;
+  if (lArm) lArm.rotation.x = -swing;              // tangan berlawanan dengan kaki di sisi yang sama
+  if (rArm) rArm.rotation.x = swing;
+  if (upper) { upper.rotation.z = Math.sin(walk.phase) * 0.04 * b; upper.rotation.y = -Math.sin(walk.phase) * 0.1 * b; }
+
+  // menapak lantai: turunkan/naikkan badan supaya kaki terendah selalu menyentuh lantai
+  p.y = 0;
+  const gL = bones.lAnkD || lAnk, gR = bones.rAnkD || rAnk;
+  if (walk.ground !== null && gL && gR && b > 0.001) {
+    mesh.updateMatrixWorld(true);
+    const v = new THREE.Vector3();
+    const low = Math.min(gL.getWorldPosition(v).y, gR.getWorldPosition(v).y);
+    p.y = Math.max(-H * 0.25, Math.min(H * 0.25, walk.ground - low));
+  }
+
+  if (shadowMesh) shadowMesh.position.set(p.x, 0.12, p.z);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ---------- Teks (tanpa suara) ----------
+const PHRASES = ['Halo!', 'Hai, ketemu lagi!', 'Ada apa?', 'Hehe, geli tahu.', 'Aku di sini!', 'Mau jalan-jalan?'];
+const bubble = document.getElementById('bubble');
+const speech = { until: 0, next: 0, v: 0, amp: 0 };
+let bubbleUntil = 0;
+
+// tampilkan teks di atas kepala; mulut ikut bergerak sebentar (diam, tanpa suara)
+function say(text, secs = 0, moveMouth = true) {
+  if (!text) return;
+  const t = clock.elapsedTime;
+  secs = secs || Math.max(1.8, text.length * 0.09 + 1);
+  bubble.textContent = text;
+  bubbleUntil = t + secs;
+  if (moveMouth) speech.until = t + Math.min(secs, text.length * 0.08 + 0.4);
+}
+function speak(text) { say(text); }
+
+const _bv = new THREE.Vector3();
+function updateBubble(t) {
+  if (!mesh || t > bubbleUntil) { bubble.style.opacity = 0; return; }
+  if (bones.head) bones.head.getWorldPosition(_bv); else _bv.set(mesh.position.x, H * 0.9, mesh.position.z);
+  _bv.y += H * 0.14;
+  _bv.project(camera);
+  const x = (_bv.x * 0.5 + 0.5) * innerWidth, y = (-_bv.y * 0.5 + 0.5) * innerHeight;
+  bubble.style.left = Math.max(60, Math.min(innerWidth - 60, x)) + 'px';
+  bubble.style.top = Math.max(50, y) + 'px';
+  bubble.style.opacity = 1;
+}
+
+// ---------- Ngantuk: mata menutup, badan mau jatuh ke depan, melek, menguap, usap mata ----------
+const BOW_DIR = 1;        // -1 kalau badan malah mendongak ke belakang
+const ARM_FWD_DIR = 1;    // -1 kalau lengan terangkat ke belakang, bukan ke depan
+const ELBOW_DIR = 1;      // -1 kalau siku menekuk ke arah yang salah
+const ELBOW_AXIS = 'y';   // sumbu tekuk siku; coba 'z' atau 'x' kalau tangan tidak sampai ke mata
+const SLEEP_LEN = 14;     // total durasi (detik)
+const sl = { wake: false, active: false, eyes: 0, bow: 0, sway: 0, yawn: 0, hands: 0, rub: 0 };
+let sleepStart = -1, sleepLines = [], sleepDirty = false;
+const lifeBox = document.getElementById('autolife');
+const ss = (a, b, x) => { const u = Math.min(1, Math.max(0, (x - a) / (b - a))); return u * u * (3 - 2 * u); };
+
+function startSleepy(wake = false) {
+  if (!mesh || vmdActive || sl.active) return;
+  idleBox.checked = true;
+  walk.active = false; if (marker) marker.visible = false;
+  sleepStart = clock.elapsedTime - (wake ? 6.0 : 0);   // mode bangun: mulai dari tersentak melek
+  sleepLines = [
+    { at: 0.3, text: 'Aku ngantuk…', dur: 3.4 },
+    { at: 4.3, text: 'zzz…', dur: 1.6 },
+    { at: 6.05, text: 'Eh…?!', dur: 1.2 },
+    { at: 7.3, text: 'Hoaaam…', dur: 3.2 },
+    { at: 11.8, text: 'Hehe, aku masih di sini kok.', dur: 2.6 },
+  ];
+  sl.wake = wake;
+  if (wake) sleepLines.forEach(e => { if (e.at < 6.5) e.done = true; });
+  sl.active = true;
+}
+
+function sleepyUpdate(t) {
+  if (!sl.active) return;
+  const s = t - sleepStart;
+  if (s > SLEEP_LEN) { sl.active = false; sl.eyes = sl.bow = sl.sway = sl.yawn = sl.hands = sl.rub = 0; sleepStart = -1; return; }
+  for (const e of sleepLines) if (!e.done && s >= e.at) { e.done = true; say(e.text, e.dur, false); }
+
+  // mata: menutup pelan, sempat berusaha melek, lalu terbuka kaget, lalu tertutup saat diusap
+  let eyes;
+  if (s < 6.0) {
+    eyes = ss(0.6, 2.6, s);
+    if (s > 3.0 && s < 3.7) eyes -= 0.4 * Math.sin(Math.PI * (s - 3.0) / 0.7);
+  } else if (s < 6.9) eyes = 1 - ss(6.0, 6.15, s);
+  else eyes = ss(6.9, 7.2, s) * (1 - ss(10.8, 11.2, s));
+
+  const yawn = ss(7.3, 8.3, s) * (1 - ss(9.8, 10.7, s));
+
+  // badan: makin menunduk, hampir jatuh ke depan, tersentak bangun, sedikit meregang saat menguap
+  let bow;
+  if (s < 6.0) bow = 0.08 * ss(0, 2, s) + 0.5 * ss(2, 4.5, s) + 0.55 * Math.pow(ss(4.5, 6.0, s), 2);
+  else if (s < 6.3) bow = sl.wake ? 0.1 : 1.13 + (0.1 - 1.13) * ss(6.0, 6.3, s);
+  else bow = 0.1 * (1 - ss(6.5, 7.5, s)) - 0.12 * yawn;
+
+  sl.eyes = eyes; sl.bow = bow; sl.yawn = yawn;
+  sl.sway = Math.sin(s * 1.4) * ss(1, 3, s) * (1 - ss(5.9, 6.2, s));
+  sl.hands = ss(6.6, 7.3, s) * (1 - ss(10.8, 11.6, s));
+  sl.rub = Math.sin((s - 7.3) * 13) * ss(7.3, 7.8, s) * (1 - ss(10.2, 10.8, s));
+}
+
+// dipanggil setelah idle & berjalan, supaya gerakan khusus menimpa pose biasa
+const act = { kind: '', u: 0, chew: 0, nod: 0, tilt: 0 };
+let elbowUsed = false;
+function sleepyApply() {
+  if (!mesh) return;
+  const { upper, upper2, neck, head, lArm, rArm, lElbow, rElbow } = bones;
+  const L = life.lie, b = sl.active ? sl.bow * BOW_DIR : 0, a = parseFloat(armSlider.value), f = ARM_FWD_DIR;
+  mesh.rotation.x = L > 0.001 ? -Math.PI / 2 * L : b * 0.18;   // condong ke depan, atau berbaring di kasur
+  if (L > 0.001 && life.from && spots.bed) {
+    const B = spots.bed;
+    mesh.rotation.y = 0;
+    mesh.position.set(life.from.x + (B.lieX - life.from.x) * L, B.lieY * L, life.from.z + (B.lieZ - life.from.z) * L);
+  }
+  let elb = false;
+  if (sl.active) {
+    if (upper) { upper.rotation.x += b * 0.35; upper.rotation.z += sl.sway * 0.08; }
+    if (upper2) upper2.rotation.x += b * 0.2;
+    if (neck) neck.rotation.x += b * 0.25 - sl.yawn * 0.08;
+    if (head) { head.rotation.x += b * 0.3 - sl.yawn * 0.2; head.rotation.z += sl.sway * 0.06; }
+    const h = sl.hands, r = sl.rub;
+    if (h > 0.001) {   // dua tangan mengusap mata
+      if (lArm) { lArm.rotation.z = a + (0.3 - a) * h + 0.1 * r; lArm.rotation.x = -1.25 * f * h + 0.08 * r; }
+      if (rArm) { rArm.rotation.z = -a + (-0.3 + a) * h - 0.1 * r; rArm.rotation.x = -1.25 * f * h - 0.08 * r; }
+      const e = ELBOW_DIR * (1.7 * h + 0.18 * r);
+      if (lElbow) lElbow.rotation[ELBOW_AXIS] = -e;
+      if (rElbow) rElbow.rotation[ELBOW_AXIS] = e;
+      elb = true;
+    }
+  }
+  const eyes = Math.max(sl.active ? sl.eyes : 0, life.eyes), bi = morph['まばたき'];
+  if (bi !== undefined && eyes > 0) mesh.morphTargetInfluences[bi] = Math.max(mesh.morphTargetInfluences[bi], eyes);
+
+  if ((act.kind === 'eat' || act.kind === 'drink') && act.u > 0.001) {   // tangan kanan ke mulut
+    const u = act.u;
+    if (rArm) { rArm.rotation.z = -a + (-0.3 + a) * u; rArm.rotation.x = -1.25 * f * u; }
+    if (rElbow) rElbow.rotation[ELBOW_AXIS] = ELBOW_DIR * 1.7 * u;
+    elb = true;
+  }
+  if (act.kind === 'eat' && head) head.rotation.x += act.nod;
+  if (act.kind === 'drink' && head) head.rotation.x -= act.tilt * 0.3;
+  if (act.kind === 'stretch') {   // tangan ke atas, badan sedikit melengkung ke belakang
+    const u = act.u;
+    if (lArm) lArm.rotation.z = a + (-1.5 - a) * u;
+    if (rArm) rArm.rotation.z = -a + (1.5 + a) * u;
+    if (upper) upper.rotation.x -= 0.12 * u;
+    if (head) head.rotation.x -= 0.2 * u;
+  }
+  if (!elb && elbowUsed) [lElbow, rElbow].forEach(e => { if (e) e.rotation.set(0, 0, 0); });
+  elbowUsed = elb;
+}
+
+// ---------- Kebutuhan: lapar, haus, tidur. Semua diputuskan sendiri oleh dia ----------
+// Tambahkan ?cepat di alamat halaman untuk uji coba (kebutuhan turun 12x lebih cepat).
+const SPEED = new URLSearchParams(location.search).has('cepat') ? 12 : 1;
+const RATE = { hunger: 0.22, thirst: 0.30, energy: 0.14 };   // turun per detik (100 -> 0)
+const HINT = 45, LOW = 30;                                   // di bawah HINT dia mengeluh, di bawah LOW dia bertindak
+const needs = { hunger: 100, thirst: 100, energy: 100 };
+const life = { state: 'free', t0: 0, cool: 10, lock: false, hinted: {}, lie: 0, lieT: 0, eyes: 0, spot: null, from: null, tries: 0, zi: -1, save: 0, stat: 0, foodS: 1, waterS: 1 };
+let lifeLines = [];
+const setLines = (a) => { lifeLines = a.map(x => ({ ...x })); };
+const runLines = (s) => { for (const e of lifeLines) if (!e.done && s >= e.at) { e.done = true; say(e.text, e.dur, false); } };
+const statEl = document.getElementById('stat');
+try {   // lanjutkan dari kondisi terakhir (turun separuh selama ditinggal, tidak sampai kritis)
+  const d = JSON.parse(localStorage.getItem('mmd-needs') || 'null');
+  if (d) { const e = Math.min(900, (Date.now() - d.ts) / 1000) * 0.5; for (const k in needs) if (typeof d[k] === 'number') needs[k] = Math.max(Math.min(d[k], 60), d[k] - RATE[k] * e); }
+} catch (e) {}
+
+function shrink(m, k) { if (m) { m.scale.setScalar(Math.max(0.05, k)); m.position.y = m.userData.y0 - m.userData.hh * (1 - k); } }
+function goTo(state, spot) {
+  life.state = state; life.spot = spot; life.t0 = clock.elapsedTime; life.tries = 0; life.lock = true;
+  walkTo({ x: spot.x, z: spot.z }, false, true, true);
+}
+function lifeDone(t, cool) { life.state = 'free'; life.lock = false; life.cool = t + cool; act.kind = ''; act.u = act.chew = act.nod = act.tilt = 0; }
+function startStretch() {
+  if (life.state !== 'free' || sl.active || !mesh) return;
+  life.state = 'stretch'; life.lock = true; life.t0 = clock.elapsedTime; walk.active = false;
+  setLines([{ at: 0.4, text: 'Hnnngh~ pegal…', dur: 2.6 }]);
+}
+
+function lifeUpdate(t, dt) {
+  const sp = dt * SPEED, asleep = life.state === 'sleep' || life.state === 'lie';
+  needs.hunger = Math.max(0, needs.hunger - RATE.hunger * sp * (asleep ? 0.3 : 1));
+  needs.thirst = Math.max(0, needs.thirst - RATE.thirst * sp * (asleep ? 0.3 : 1));
+  needs.energy = asleep ? Math.min(100, needs.energy + 1.6 * sp) : Math.max(0, needs.energy - RATE.energy * sp);
+  life.lie += (life.lieT - life.lie) * (1 - Math.exp(-2.5 * dt));
+  if (life.state !== 'eat') life.foodS += (1 - life.foodS) * dt * 0.04;
+  if (life.state !== 'drink') life.waterS += (1 - life.waterS) * dt * 0.04;
+  shrink(foodMesh, life.foodS); shrink(glassMesh, life.waterS);
+  if (t > life.save) { life.save = t + 5; try { localStorage.setItem('mmd-needs', JSON.stringify({ ...needs, ts: Date.now() })); } catch (e) {} }
+  if (t > life.stat) { life.stat = t + 1; statEl.textContent = `Lapar ${Math.round(needs.hunger)} · Haus ${Math.round(needs.thirst)} · Tenaga ${Math.round(needs.energy)} · ${life.state}`; }
+  if (!mesh || vmdActive || !lifeBox.checked) return;
+
+  const S = life.state, s = t - life.t0, sp0 = life.spot;
+  const faceTo = (ang) => { let d = ang - mesh.rotation.y; d = Math.atan2(Math.sin(d), Math.cos(d)); mesh.rotation.y += d * (1 - Math.exp(-8 * dt)); };
+  runLines(s);
+
+  if (S === 'free') {
+    if (sl.active || t < life.cool || t - auto.lastTouch < 4) return;
+    for (const k in needs) if (needs[k] > HINT + 20) life.hinted[k] = false;
+    const low = Object.keys(needs).filter(k => needs[k] < LOW).sort((x, y) => needs[x] - needs[y])[0];
+    if (low === 'hunger') { say('Lapar… cari makan dulu.', 2.5, false); goTo('toFood', spots.food); }
+    else if (low === 'thirst') { say('Haus… mau minum.', 2.5, false); goTo('toWater', spots.water); }
+    else if (low === 'energy') { say('Udah nggak kuat… tidur dulu.', 2.8, false); goTo('toBed', spots.bed); }
+    else if (needs.energy < HINT && !life.hinted.energy) { life.hinted.energy = true; startSleepy(); }
+    else if (needs.hunger < HINT && !life.hinted.hunger) { life.hinted.hunger = true; say('Perutku bunyi… krucuk.', 3, false); }
+    else if (needs.thirst < HINT && !life.hinted.thirst) { life.hinted.thirst = true; say('Tenggorokanku kering…', 3, false); }
+    return;
+  }
+  if (S === 'toFood' || S === 'toWater' || S === 'toBed') {
+    if (walk.active) return;
+    if (Math.hypot(sp0.x - mesh.position.x, sp0.z - mesh.position.z) < H * 0.2) {
+      mesh.position.x = sp0.x; mesh.position.z = sp0.z;
+      life.from = { x: sp0.x, z: sp0.z }; life.t0 = t;
+      if (S === 'toBed') { life.state = 'lie'; life.lieT = 1; life.eyes = 1; setLines([{ at: 0.2, text: 'Selamat tidur…', dur: 2.2 }]); }
+      else if (S === 'toFood') { life.state = 'eat'; setLines([{ at: 0.3, text: 'Nyam nyam…', dur: 3.5 }, { at: 7.4, text: 'Kenyang~ 😋', dur: 2.2 }]); }
+      else { life.state = 'drink'; setLines([{ at: 0.3, text: 'Glek glek glek…', dur: 3 }, { at: 4.8, text: 'Ahh, segar!', dur: 2 }]); }
+    } else if (++life.tries > 3 || s > 40) lifeDone(t, 15);
+    else walkTo({ x: sp0.x, z: sp0.z }, false, true, true);
+    return;
+  }
+  if (S === 'eat') {
+    faceTo(sp0.face); act.kind = 'eat';
+    const c = 0.5 - 0.5 * Math.cos(s * Math.PI * 2 / 1.7);                 // satu suapan = satu siklus
+    act.u = c * ss(0.2, 0.9, s) * (1 - ss(7.4, 8.2, s));
+    act.nod = 0.12 * c * act.u; act.chew = c < 0.35 && s > 0.8 && s < 8 ? 0.2 + 0.2 * Math.abs(Math.sin(s * 12)) : 0;
+    needs.hunger = Math.min(100, needs.hunger + dt * 80 / 9.5);
+    life.foodS = Math.max(0.12, 1 - 0.88 * s / 8);
+    if (s > 9.6) lifeDone(t, 8);
+    return;
+  }
+  if (S === 'drink') {
+    faceTo(sp0.face); act.kind = 'drink';
+    act.u = ss(0.4, 1.3, s) * (1 - ss(3.9, 4.8, s)); act.tilt = act.u;
+    act.chew = act.u > 0.8 ? 0.15 * Math.abs(Math.sin(s * 9)) : 0;
+    needs.thirst = Math.min(100, needs.thirst + dt * 80 / 6.8);
+    life.waterS = Math.max(0.12, 1 - 0.85 * s / 4.5);
+    if (s > 6.8) lifeDone(t, 8);
+    return;
+  }
+  if (S === 'stretch') {
+    act.kind = 'stretch'; act.u = ss(0, 1.2, s) * (1 - ss(2.8, 4, s));
+    if (s > 4) lifeDone(t, 10);
+    return;
+  }
+  if (S === 'lie') { if (s > 2.6) { life.state = 'sleep'; life.t0 = t; life.zi = -1; } return; }
+  if (S === 'sleep') {
+    const zi = Math.floor(s / 2.6);
+    if (zi !== life.zi) { life.zi = zi; say('z'.repeat(zi % 3 + 1) + '…', 2.3, false); }
+    if (needs.energy >= 100) { life.state = 'wake'; life.t0 = t; life.lieT = 0; life.eyes = 0; startSleepy(true); }
+    return;
+  }
+  if (S === 'wake') { if (!sl.active) { life.hinted = {}; lifeDone(t, 30); } }
+}
+
+// mulut: 5 vokal (あ い う え お), halus. Tanpa suara: gerak mulut hanya saat teks tampil atau menguap
+const VOW = ['あ', 'い', 'う', 'え', 'お'];
+const mouth = { cur: [0, 0, 0, 0, 0] };
+function updateMouth(t, dt) {
+  if (!mesh || vmdActive) return;
+  const tgt = [0, 0, 0, 0, 0];
+  if (sl.yawn > 0.01) {
+    tgt[0] = sl.yawn;
+  } else if (act.chew > 0.01) {
+    tgt[0] = act.chew;
+  } else if (t < speech.until) {
+    if (t > speech.next) {
+      speech.next = t + 0.07 + Math.random() * 0.09;
+      speech.v = Math.floor(Math.random() * 5);
+      speech.amp = Math.random() < 0.2 ? 0.1 : 0.45 + Math.random() * 0.5;
+    }
+    tgt[speech.v || 0] = speech.amp || 0;
+  }
+  const k = 1 - Math.exp(-20 * dt);
+  for (let i = 0; i < 5; i++) {
+    mouth.cur[i] += (tgt[i] - mouth.cur[i]) * k;
+    const idx = morph[VOW[i]];
+    if (idx !== undefined) mesh.morphTargetInfluences[idx] = mouth.cur[i];
+  }
+}
+
+// ---------- Simpan model di browser (IndexedDB) ----------
+const DB_NAME = 'mmd-room', STORE = 'files';
+function dbOpen() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open(DB_NAME, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore(STORE);
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function dbPut(name, blob) {
+  const db = await dbOpen();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).put(blob, name);
+    tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+  });
+}
+async function dbAll() {
+  const db = await dbOpen();
+  return new Promise((res, rej) => {
+    const st = db.transaction(STORE).objectStore(STORE);
+    const k = st.getAllKeys(), v = st.getAll();
+    v.onsuccess = () => res({ keys: k.result, vals: v.result });
+    v.onerror = () => rej(v.error);
+  });
+}
+async function dbClear() {
+  const db = await dbOpen();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).clear();
+    tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+  });
+}
+
+const ui = document.getElementById('ui');
+document.getElementById('tg').onclick = () => { ui.style.display = ui.style.display === 'none' ? 'flex' : 'none'; };
+document.getElementById('clear').onclick = async () => {
+  await dbClear().catch(() => {});
+  msg.textContent = 'Model tersimpan dihapus. Muat ulang halaman untuk memilih file baru.';
+};
+
+// Saat dibuka: kalau ada model tersimpan, langsung dimuat
+(async () => {
+  try {
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
+    const { keys, vals } = await dbAll();
+    if (!keys.some(k => String(k).endsWith('.pmx'))) return;
+    keys.forEach((k, i) => {
+      const u = URL.createObjectURL(vals[i]);
+      fileMap[k] = u; nFiles++;
+      if (String(k).endsWith('.pmx')) pmxUrl = u + '#.pmx';
+    });
+    msg.textContent = 'Memuat model tersimpan…';
+    loadModel(pmxUrl);
+  } catch (e) { console.warn('Tidak bisa membaca penyimpanan', e); }
+})();
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+
+function tick() {
+  requestAnimationFrame(tick);
+  const dt = clock.getDelta();
+  if (mesh) {
+    const t = clock.elapsedTime;
+    if (!vmdActive && idleBox.checked) idle(t, dt);
+    if (!vmdActive) { lifeUpdate(t, dt); updateAuto(t, dt); updateWalk(dt); sleepyUpdate(t); sleepyApply(); }
+    updateMouth(t, dt);
+    helper.update(dt);
+    updateBubble(t);
+  }
+  controls.update();
+  renderer.render(scene, camera);
+}
+tick();
+</script>
+</body>
+</html>
