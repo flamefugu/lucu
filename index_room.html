@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#20232b">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>Ruangan MMD</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #20232b; overflow: hidden; font-family: system-ui, sans-serif; }
+  canvas { display: block; }
+  #ui { position: fixed; left: 10px; top: calc(10px + env(safe-area-inset-top, 0px)); right: 10px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+        color: #fff; font-size: 13px; background: rgba(0,0,0,.55); padding: 8px 10px; border-radius: 10px; max-width: 460px; z-index: 6; }
+  #ui input[type=range] { width: 120px; }
+  #tg { position: fixed; right: 10px; top: 10px; z-index: 7; opacity: .6; }
+  #msg { position: fixed; left: 0; right: 0; bottom: 12px; text-align: center; color: #cfd3dc; font-size: 13px; pointer-events: none; }
+  .bubble { position: fixed; left: 50%; top: 40%; transform: translate(-50%, -100%); z-index: 4; pointer-events: none; opacity: 0; transition: opacity .25s;
+            background: #fff; color: #23262e; padding: 6px 12px; border-radius: 14px; font-size: 14px; max-width: 60vw; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,.35); border: 2px solid var(--c, #fff); }
+  .bubble::before { content: attr(data-n); display: block; font-size: 11px; font-weight: 700; color: var(--c, #888); }
+  .bubble::after { content: ""; position: absolute; left: 50%; bottom: -8px; margin-left: -7px; border: 7px solid transparent; border-bottom: 0; border-top-color: var(--c, #fff); }
+  button { padding: 4px 10px; border-radius: 6px; border: 0; }
+</style>
+</head>
+<body>
+<button id="tg">☰</button>
+<div id="ui">
+  <label>Nama karakter: <input id="cname" type="text" value="Rafayel" style="width:100px"></label>
+  <label>1) Tambah file karakter (pmx, lalu isi folder tex, lalu isi folder spa): <input id="files" type="file" multiple></label>
+  <button id="go">2) Tambah karakter</button>
+  <button id="clear">Hapus semua karakter</button>
+  <label>Sudut lengan <input id="arm" type="range" min="-1.6" max="1.6" step="0.05" value="0.9"></label>
+  <label><input id="idle" type="checkbox" checked> Idle</label>
+  <label><input id="auto" type="checkbox" checked> Jalan sendiri</label>
+  <label><input id="autolife" type="checkbox" checked> Hidup sendiri (lapar, haus, tidur, ngobrol)</label>
+  <label><input id="follow" type="checkbox" checked> Ikuti jari (1 jari = karakter terpilih jalan, 2 jari = kamera)</label>
+  <label><input id="legflip" type="checkbox"> Balik arah kaki</label>
+  <div id="stat" style="width:100%"></div>
+</div>
+<div id="msg">Tambah karakter lewat ☰. Ketuk karakter untuk memilih.</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { MMDLoader } from 'three/addons/loaders/MMDLoader.js';
+import { MMDAnimationHelper } from 'three/addons/animation/MMDAnimationHelper.js';
+
+const msg = document.getElementById('msg');
+const $ = (id) => document.getElementById(id);
+const pick = (a) => a[Math.floor(Math.random() * a.length)];
+const ss = (a, b, x) => { const u = Math.min(1, Math.max(0, (x - a) / (b - a))); return u * u * (3 - 2 * u); };
+const flash = (t, ms = 3000) => { msg.textContent = t; setTimeout(() => { if (msg.textContent === t) msg.textContent = ''; }, ms); };
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x20232b);
+const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.1, 2000);
+scene.add(new THREE.AmbientLight(0xffffff, 1.6));
+const dir = new THREE.DirectionalLight(0xffffff, 1.2); dir.position.set(-1, 2, 2); scene.add(dir);
+const controls = new OrbitControls(camera, renderer.domElement);
+const helper = new MMDAnimationHelper({ afterglow: 2.0 });
+const clock = new THREE.Clock();
+
+const armSlider = $('arm'), idleBox = $('idle'), autoBox = $('auto'), lifeBox = $('autolife'), followBox = $('follow'), legFlip = $('legflip');
+
+// ---- tetapan arah (balik ke -1 kalau gerakannya terbalik pada modelmu) ----
+const NOD_DIR = 1, LOOK_X_DIR = 1, LOOK_Y_DIR = 1, BOW_DIR = 1, ARM_FWD_DIR = 1, ELBOW_DIR = 1, ELBOW_AXIS = 'y';
+const SLEEP_LEN = 14;
+const SPEED = new URLSearchParams(location.search).has('cepat') ? 12 : 1;   // ?cepat = kebutuhan turun 12x lebih cepat
+const HINT = 45, LOW = 30;
+
+// ---------- Kepribadian ----------
+const DEF = { color: '#7aa2ff', talk: 1.5, rate: { hunger: 0.22, thirst: 0.3, energy: 0.14 }, t: {
+  hintHungry: ['Perutku mulai bunyi…'], hintThirsty: ['Agak haus…'], goHungry: ['Lapar… cari makan dulu.'], goThirsty: ['Haus… mau minum.'], goSleep: ['Udah nggak kuat… tidur dulu.'],
+  eatStart: ['Nyam nyam…'], eatEnd: ['Kenyang~ 😋'], drinkStart: ['Glek glek glek…'], drinkEnd: ['Ahh, segar!'], stretch: ['Hnnngh~ pegal…'], sleepIn: ['Selamat tidur…'],
+  drowsy: ['Aku ngantuk…'], jolt: ['Eh…?!'], wakeEnd: ['Hehe, aku masih di sini kok.'], greet: ['Halo!', 'Hai!'], idle: ['Hmm…', 'Lagi apa ya…'],
+  chatStart: ['Hai, {o}! Lagi apa?'], reply: ['Oh, begitu ya.'], sleepyReply: ['Maaf, aku ngantuk… tapi lanjut aja.'], chat: ['Hari ini lumayan seru.'], reply2: ['Hehe, iya juga.'], bye: ['Sampai nanti, {o}!'],
+  seeSleeper: ['{o} lagi tidur… jangan berisik.'], wait: ['Nanti dulu deh, ada yang pakai.'] } };
+const PERSONA = {
+  rafayel: { color: '#ff7fb0', talk: 3, rate: { hunger: 0.26, thirst: 0.34, energy: 0.12 }, t: {
+    hintHungry: ['Perutku bunyi! Makhluk secantik aku tidak boleh kelaparan!'], hintThirsty: ['Tenggorokanku kering… ini penyiksaan!'],
+    goHungry: ['Aku lapar sekali! Minggir, aku mau makan!'], goThirsty: ['Haus! Segera, air untukku!'], goSleep: ['Aku butuh tidur kecantikan. Jangan ganggu!'],
+    eatStart: ['Nyam nyam… enak, tentu saja.'], eatEnd: ['Hmm, lumayan. Layak masuk mulutku~ 😋'], drinkStart: ['Glek glek glek…'], drinkEnd: ['Ahh, segar! Seperti aku.'],
+    stretch: ['Haaah~ otot-ototku yang indah pegal.'], sleepIn: ['Selamat tidur, dunia. Kalian beruntung.'],
+    drowsy: ['Aku… ngantuk… tapi aku tidak mau kelihatan jelek…'], jolt: ['Eh?! Aku tidak tidur! Cuma memejamkan mata secara dramatis!'], wakeEnd: ['Hmph, aku tetap memesona kok.'],
+    greet: ['Halo! Akhirnya ada yang menyapaku. Wajar sih.', 'Hai~ Jangan silau ya.'],
+    idle: ['Aku bosan! Dunia ini kurang dramatis.', 'Kenapa tidak ada yang memujiku hari ini?', 'Hmph. Aku sedang ngambek. Tanpa alasan.', 'Oh, nasib! Terkurung di ruangan ini bersama kecantikanku!'],
+    chatStart: ['{o}! Dengar, aku harus cerita sesuatu yang penting banget!', '{o}, kamu tahu betapa melelahkannya jadi seindah aku?', '{o}, kemari. Aku mau curhat. Sekarang.'],
+    reply: ['Tentu boleh! Aku selalu menarik untuk didengar.', 'Oh, kamu mau dengar ceritaku? Pilihan bagus!'], sleepyReply: ['Aku ngantuk, tapi tetap cantik. Lanjut.'],
+    chat: ['Hari ini semuanya salah. SEMUANYA.', 'Tapi sudahlah, aku tetap yang paling mempesona di sini.', 'Kamu harusnya bersyukur sekamar denganku!'],
+    reply2: ['Jangan memotong ceritaku yang dramatis!', 'Hmph, setidaknya kamu mendengarkan.'],
+    bye: ['Sudah ya, aku capek jadi pusat perhatian.', 'Oke, cukup. Kamu boleh pergi. Aku masih indah.'],
+    seeSleeper: ['{o} tidur lagi?! Aku ditinggal sendirian dengan kebosananku!', 'Hei {o}! Bangun! Aku butuh penonton!'], wait: ['Hah, dipakai orang? Dunia tidak adil!'] } },
+  xavier: { color: '#6f9bff', talk: 1, rate: { hunger: 0.18, thirst: 0.22, energy: 0.2 }, t: {
+    hintHungry: ['Perutku mulai bunyi…'], hintThirsty: ['Agak haus…'], goHungry: ['Waktunya makan dulu.'], goThirsty: ['Minum dulu, ya.'], goSleep: ['Aku tidur sebentar ya…'],
+    eatStart: ['Nyam…'], eatEnd: ['Kenyang. Terima kasih.'], drinkStart: ['Glek…'], drinkEnd: ['Ah, lega.'], stretch: ['Hmm… pegal juga.'], sleepIn: ['Selamat malam…'],
+    drowsy: ['Aku ngantuk…'], jolt: ['Eh…? Aku nggak tidur kok.'], wakeEnd: ['Maaf, ya. Aku masih di sini.'], greet: ['Halo.', 'Oh, hai. Apa kabar?'],
+    idle: ['Tenang sekali hari ini.', 'Pelan-pelan saja…', 'Hmm, enaknya duduk sebentar…'],
+    chatStart: ['{o}, ada yang mau kamu ceritakan? Aku dengarkan.', 'Hai, {o}. Pelan-pelan saja ceritanya.'],
+    reply: ['Hm, begitu ya. Aku mendengarkan.', 'Pelan-pelan saja, {o}.'], sleepyReply: ['Maaf… aku ngantuk, tapi ceritalah. Aku dengar.'],
+    chat: ['Kamu hebat, kok.', 'Tarik napas dulu. Semua baik-baik saja.'], reply2: ['Iya, aku di sini.', 'Tidak apa-apa. Aku sabar.'],
+    bye: ['Terima kasih sudah bercerita. Aku istirahat dulu ya…', 'Semangat ya, {o}.'], seeSleeper: ['Sstt… {o} sedang tidur. Jangan berisik.'], wait: ['Tidak apa-apa, aku tunggu giliran.'] } },
+};
+const DEFX = {
+  fightStart: ['{o}, kita perlu bicara. Aku kesal.'], fightReply: ['Aku juga kesal!'], fight2: ['Kamu selalu begitu!'], fightEnd: ['Sudahlah! Aku pergi.'],
+  comfortStart: ['{o}, kamu kenapa? Sini cerita.'], sadReply: ['Aku nggak apa-apa…'], comfort: ['Aku di sini, kok.'], thanks: ['Makasih ya…'], comfortEnd: ['Jangan dipendam sendiri, ya.'],
+  apologize: ['{o}, maaf ya. Tadi aku keterlaluan.'], forgive: ['Iya… aku juga minta maaf.'], refuse: ['Belum. Aku masih kesal.'], relieved: ['Syukurlah. Kita baikan ya?'],
+  idleAngry: ['Hmph.'], idleSad: ['…'], idleHappy: ['Hehe~'] };
+const EXTRA = {
+  rafayel: { temper: 0.6, kind: 0.35, t: {
+    fightStart: ['{o}! Kamu pikir aku tidak tahu kamu menghindariku?!', '{o}, KITA HARUS BICARA. Sekarang!'], fightReply: ['Aku?! Kamu yang selalu berlebihan!', 'Tenang sedikit, bisa tidak?'],
+    fight2: ['Jangan potong aku! Kamu keras kepala!', 'Kamu tidak pernah mengerti perasaanku!'], fightEnd: ['Hmph! Aku tidak mau bicara lagi denganmu!', 'Pergi! Eh, tidak, AKU yang pergi!'],
+    comfortStart: ['{o}, kenapa mukamu begitu? Cerita. Aku mau dengar… sedikit.'], sadReply: ['Aku baik-baik saja…', 'Tidak usah peduli…'],
+    comfort: ['Hmph, jangan sedih. Merusak pemandangan.', 'Aku di sini kok. Jangan gede rasa.'], thanks: ['Makasih… jangan bilang siapa-siapa.'], comfortEnd: ['Sudah? Bagus. Aku tetap yang paling cantik.'],
+    apologize: ['{o}… maaf. Tapi bukan berarti aku salah semua!', '{o}, aku terlalu emosi tadi. Maaf.'], forgive: ['Hmph… baiklah, kumaafkan. Sekali ini.'], refuse: ['Tidak! Aku masih marah. Pergi sana!'],
+    relieved: ['Bagus. Jangan diulangi. Eh, aku juga.'], idleAngry: ['Hmph! Dia benar-benar menyebalkan!', 'Aku tidak marah. Aku MURKA.'], idleSad: ['Tidak ada yang mengerti aku…', 'Kenapa selalu aku yang terluka…'], idleHappy: ['Hari ini indah, seperti aku~', 'Hehe, kita baikan. Wajar sih.'] } },
+  xavier: { temper: 0.1, kind: 0.8, t: {
+    fightStart: ['{o}, aku mau bicara. Aku kecewa.'], fightReply: ['Aku juga punya perasaan…', 'Bukan begitu maksudku…'], fight2: ['Kenapa selalu begini…'], fightEnd: ['Aku butuh waktu sendiri.'],
+    comfortStart: ['{o}, kamu kenapa? Duduk sini, cerita pelan-pelan.'], sadReply: ['Aku tidak apa-apa…'], comfort: ['Aku di sini. Kamu tidak sendirian.', 'Tarik napas dulu.'], thanks: ['Terima kasih, {o}…'], comfortEnd: ['Kapan pun kamu butuh, aku ada.'],
+    apologize: ['{o}, maaf ya. Aku tidak mau kita begini.'], forgive: ['Iya, aku juga minta maaf. Terima kasih sudah datang.'], refuse: ['Maaf… beri aku waktu dulu, ya.'], relieved: ['Syukurlah. Terima kasih, {o}.'],
+    idleAngry: ['…aku butuh udara.'], idleSad: ['Mungkin aku terlalu keras tadi…'], idleHappy: ['Rasanya lega.'] } } };
+function persona(name) { const n = name.toLowerCase(), P = PERSONA[n] || {}, X = EXTRA[n] || {};
+  return { color: P.color || DEF.color, talk: P.talk || DEF.talk, rate: P.rate || DEF.rate, temper: X.temper ?? 0.3, kind: X.kind ?? 0.5, t: { ...DEF.t, ...DEFX, ...(P.t || {}), ...(X.t || {}) } }; }
+const T = (c, key, o) => String(pick(c.p.t[key] || DEF.t[key] || [''])).replace('{o}', o ? o.name : '');
+
+// ---------- Ruangan ----------
+const H = 18, RW = H * 4, NR = 4, WX = RW * NR / 2, WZ = H * 2.4, HALF = WZ, PAD = 0.3;   // 4 ruangan berjajar: 0 kamar Rafayel | 1 ruang tamu | 2 dapur | 3 kamar Xavier
+const roomCx = (i) => -WX + RW * (i + 0.5);
+const roomIdx = (x) => Math.max(0, Math.min(NR - 1, Math.floor((x + WX) / RW)));
+function route(x0, x1) {   // titik pintu yang harus dilewati dari x0 ke x1
+  const a = roomIdx(x0), b = roomIdx(x1), v = [];
+  if (a < b) for (let k = a; k < b; k++) v.push({ x: -WX + RW * (k + 1), z: 0 }); else for (let k = a; k > b; k--) v.push({ x: -WX + RW * k, z: 0 });
+  return v;
+}
+let camShift = 0, camRoom = 1;
+let room = null, floorMesh = null, marker = null, foodMesh = null, glassMesh = null, spots = {};
+const obstacles = [];
+const chars = []; let selected = null;
+const blobTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 128; const g = c.getContext('2d');
+  const gr = g.createRadialGradient(64, 64, 4, 64, 64, 62); gr.addColorStop(0, 'rgba(0,0,0,.5)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 128, 128); return new THREE.CanvasTexture(c); })();
+function woodTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 256; const g = c.getContext('2d');
+  for (let i = 0; i < 4; i++) { g.fillStyle = ['#c9a679', '#bf9a6c', '#d2b087', '#c4a074'][i]; g.fillRect(0, i * 64, 256, 64);
+    g.fillStyle = 'rgba(80,50,20,.35)'; g.fillRect(0, i * 64, 256, 2); g.fillRect(((i * 97) % 200) + 20, i * 64, 2, 64); }
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+function addBox(parent, w, h, d, color, x, y, z, solid) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshLambertMaterial({ color }));
+  m.position.set(x, y + h / 2, z); parent.add(m);
+  if (solid) obstacles.push({ x0: x - w / 2, x1: x + w / 2, z0: z - d / 2, z1: z + d / 2 });
+  return m;
+}
+function buildRoom() {
+  const h = H, SX = WX, SZ = WZ, WH = h * 2.7, C = roomCx;
+  room = new THREE.Group();
+  const tex = woodTexture(); tex.repeat.set(8, 2.4);
+  floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(SX * 2, SZ * 2), new THREE.MeshLambertMaterial({ map: tex }));
+  floorMesh.rotation.x = -Math.PI / 2; room.add(floorMesh);
+  const wm = [0xefe4d6, 0xe3ecd9, 0xf5e9cf, 0xdde6ee].map(c => new THREE.MeshLambertMaterial({ color: c }));
+  const wallP = (w, mat, x, z, ry) => { const m = new THREE.Mesh(new THREE.PlaneGeometry(w, WH), mat); m.position.set(x, WH / 2, z); m.rotation.y = ry; room.add(m); };
+  for (let i = 0; i < NR; i++) wallP(RW, wm[i], C(i), -SZ, 0);
+  wallP(SZ * 2, wm[0], -SX, 0, Math.PI / 2); wallP(SZ * 2, wm[NR - 1], SX, 0, -Math.PI / 2);
+  // dinding pembatas + pintu antar ruangan
+  const dr = h * 0.9;
+  [-RW, 0, RW].forEach(x => {
+    addBox(room, 1, WH, SZ - dr, 0xcfc3b3, x, 0, -(SZ + dr) / 2, true); addBox(room, 1, WH, SZ - dr, 0xcfc3b3, x, 0, (SZ + dr) / 2, true);
+    addBox(room, 1.4, WH - h * 1.9, dr * 2, 0xcfc3b3, x, h * 1.9, 0, false);
+    addBox(room, 2, h * 1.9, 1.5, 0x8b6b4a, x, 0, -dr, false); addBox(room, 2, h * 1.9, 1.5, 0x8b6b4a, x, 0, dr, false);
+  });
+  addBox(room, SX * 2, h * 0.12, 0.3, 0xc9b79f, 0, 0, -SZ + 0.15, false);
+  const win = (x, w) => { addBox(room, w * 1.15, h * 1.2, 0.4, 0x8b6b4a, x, h * 1.0, -SZ + 0.2, false);
+    const g = new THREE.Mesh(new THREE.PlaneGeometry(w, h * 1.0), new THREE.MeshBasicMaterial({ color: 0xbfe4ff })); g.position.set(x, h * 1.6, -SZ + 0.45); room.add(g); };
+  win(C(3), h * 1.5); win(C(2) + h * 0.35, h * 1.3);
+  [0xf0b8c4, 0xbfd9b5, 0xf3d9a4, 0xb8d0f0].forEach((col, i) => { const r = new THREE.Mesh(new THREE.CircleGeometry(h * 1.2, 40), new THREE.MeshLambertMaterial({ color: col }));
+    r.rotation.x = -Math.PI / 2; r.position.set(C(i), 0.05, h * 0.3); room.add(r); });
+  const light = (col, k, x, y, z) => { const l = new THREE.PointLight(col, h * h * k, 0, 2); l.position.set(x, y, z); room.add(l); };
+
+  // satu kasur per kamar tidur, menempel di dinding luar
+  const bed = (s, blanket) => {
+    const bx = s * (SX - h * 1.0), bz = -SZ + h * 1.4, xa = bx + s * h * 0.95, xb = bx - s * h * 0.4;
+    addBox(room, h * 1.9, h * 0.35, h * 2.8, 0x8b5e3c, bx, 0, bz, false);
+    obstacles.push({ x0: Math.min(xa, xb), x1: Math.max(xa, xb), z0: bz - h * 1.4, z1: bz + h * 1.4 });
+    addBox(room, h * 1.8, h * 0.2, h * 2.7, 0xf4f1ec, bx, h * 0.35, bz, false);
+    addBox(room, h * 1.5, h * 0.12, h * 0.5, 0xffffff, bx, h * 0.55, bz - h * 1.0, false);
+    addBox(room, h * 1.8, h * 0.08, h * 1.3, blanket, bx, h * 0.55, bz + h * 0.5, false);
+    return { x: bx - s * h * 0.75, z: bz, face: s * Math.PI / 2, lieX: bx, lieZ: bz + h * 0.05, lieY: h * 0.66, by: null };
+  };
+  const bed1 = bed(-1, 0x8fb3d9), bed2 = bed(1, 0xe9a6b8);
+  const plant = (px, pz) => { addBox(room, h * 0.35, h * 0.4, h * 0.35, 0xc57f5a, px, 0, pz, true);
+    const leaf = new THREE.Mesh(new THREE.SphereGeometry(h * 0.35, 14, 10), new THREE.MeshLambertMaterial({ color: 0x5fae6a })); leaf.position.set(px, h * 0.75, pz); room.add(leaf); };
+
+  // 0: kamar Rafayel: rak buku, lampu
+  addBox(room, h * 1.5, h * 1.9, h * 0.45, 0x7a5233, C(0) + h * 1.0, 0, -SZ + h * 0.3, true);
+  [0.35, 0.8, 1.25, 1.6].forEach((yy, i) => addBox(room, h * 1.3, h * 0.28, h * 0.1, [0xd26a6a, 0x6a9bd2, 0x7dc47d, 0xd9c04a][i], C(0) + h * 1.0, h * yy, -SZ + h * 0.55, false));
+  const lx = -SX + h * 0.5, lz = h * 1.8;
+  addBox(room, h * 0.12, h * 1.6, h * 0.12, 0x555555, lx, 0, lz, true);
+  const shade = new THREE.Mesh(new THREE.SphereGeometry(h * 0.3, 16, 12), new THREE.MeshBasicMaterial({ color: 0xffe2a8 })); shade.position.set(lx, h * 1.75, lz); room.add(shade);
+  light(0xffd9a8, 3, lx + h * 0.3, h * 1.7, lz);
+
+  // 1: ruang tamu: TV, sofa, meja, tanaman
+  const lc = C(1);
+  addBox(room, h * 1.8, h * 0.5, h * 0.5, 0x4a3b32, lc, 0, -SZ + h * 0.4, true);
+  addBox(room, h * 1.4, h * 0.8, 0.5, 0x15171c, lc, h * 0.5, -SZ + h * 0.4, false);
+  addBox(room, h * 1.3, h * 0.7, 0.2, 0x3d5a80, lc, h * 0.55, -SZ + h * 0.4 + 0.35, false);
+  addBox(room, h * 2.2, h * 0.5, h * 0.9, 0xb85c5c, lc, 0, h * 0.9, true);
+  addBox(room, h * 2.2, h * 0.55, h * 0.2, 0xa04c4c, lc, h * 0.5, h * 0.9 + h * 0.35, false);
+  [-1, 1].forEach(k => addBox(room, h * 0.2, h * 0.8, h * 0.9, 0xa04c4c, lc + k * h * 1.1, 0, h * 0.9, false));
+  addBox(room, h * 1.0, h * 0.3, h * 0.6, 0x9b7a55, lc, 0, -SZ + h * 1.7, true);
+  addBox(room, h * 0.3, h * 0.05, h * 0.22, 0xd9c04a, lc - 4, h * 0.3, -SZ + h * 1.7, false);
+  plant(lc - h * 1.7, h * 1.8);
+  light(0xfff0d8, 2, lc, h * 2, 0);
+
+  // 2: dapur: meja makan (makanan & minum), counter + kompor, kulkas
+  const kc = C(2), tx = kc + h * 0.45, tz = -SZ + h * 0.4;
+  addBox(room, h * 1.4, h * 0.55, h * 0.55, 0xd8d2c8, kc - h * 1.0, 0, -SZ + h * 0.3, true);
+  addBox(room, h * 0.5, h * 0.03, h * 0.4, 0x222222, kc - h * 1.0, h * 0.55, -SZ + h * 0.3, false);
+  addBox(room, h * 0.78, h * 1.9, h * 0.8, 0xf2f2f2, kc + h * 1.5, 0, -SZ + h * 0.4, true);
+  addBox(room, h * 1.1, h * 0.5, h * 0.5, 0xb98b5e, tx, 0, tz, true);
+  addBox(room, h * 0.34, h * 0.03, h * 0.34, 0xffffff, tx - h * 0.28, h * 0.5, tz, false);
+  foodMesh = addBox(room, h * 0.22, h * 0.12, h * 0.22, 0xe7a35a, tx - h * 0.28, h * 0.53, tz, false);
+  glassMesh = addBox(room, h * 0.12, h * 0.2, h * 0.12, 0x9fd6f2, tx + h * 0.28, h * 0.5, tz, false);
+  [[foodMesh, h * 0.06], [glassMesh, h * 0.1]].forEach(([m, hh]) => { m.userData.y0 = m.position.y; m.userData.hh = hh; });
+  light(0xfff6e0, 2, kc, h * 2, h * 0.5);
+
+  // 3: kamar Xavier: lemari, tanaman
+  addBox(room, h * 1.0, h * 0.85, h * 1.5, 0xa77b52, SX - h * 0.6, 0, h * 1.5, true);
+  addBox(room, h * 0.5, h * 0.55, h * 0.5, 0xdddddd, SX - h * 0.55, h * 0.85, h * 1.5, false);
+  plant(C(3) - h * 1.0, h * 1.9);
+  light(0xdfe8ff, 1.5, C(3), h * 2, h * 0.5);
+
+  spots = { food: { x: tx - h * 0.28, z: -SZ + h * 1.0, face: Math.PI, by: null }, water: { x: tx + h * 0.28, z: -SZ + h * 1.0, face: Math.PI, by: null }, beds: [bed1, bed2] };
+  scene.add(room);
+
+  marker = new THREE.Mesh(new THREE.RingGeometry(h * 0.18, h * 0.24, 28), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8, depthWrite: false }));
+  marker.rotation.x = -Math.PI / 2; marker.position.y = 0.15; marker.visible = false; scene.add(marker);
+  const asp = camera.aspect, d = Math.max(h * 9, (asp < 1.2 ? RW * 1.05 : SX * 2.1) / (0.63 * asp));   // HP tegak: satu ruangan, kamera ikut karakter terpilih
+  camShift = asp < 1.2 ? C(camRoom) : 0;
+  controls.target.set(camShift, h * 0.55, 0); camera.position.set(camShift, h * 0.55 + d * 0.42, d * 0.9);
+  controls.minDistance = h * 0.8; controls.maxDistance = h * 30; controls.maxPolarAngle = Math.PI / 2 - 0.03; controls.update();
+}
+buildRoom();
+
+function setControls() {
+  const f = followBox.checked;
+  controls.enableRotate = true; controls.enablePan = !f; controls.enableZoom = true;
+  controls.touches = { ONE: f ? -1 : THREE.TOUCH.ROTATE, TWO: f ? THREE.TOUCH.DOLLY_ROTATE : THREE.TOUCH.DOLLY_PAN };
+  controls.mouseButtons = { LEFT: f ? -1 : THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+}
+followBox.addEventListener('change', setControls); setControls();
+
+function blocked(x, z) {
+  const p = H * PAD;
+  if (Math.abs(x) > WX - H * 0.4 || Math.abs(z) > WZ - H * 0.4) return true;
+  return obstacles.some(o => x > o.x0 - p && x < o.x1 + p && z > o.z0 - p && z < o.z1 + p);
+}
+
+// ---------- Karakter ----------
+function makeChar(name, mesh) {
+  const find = (n) => mesh.skeleton.getBoneByName(n);
+  const c = { name, p: persona(name), mesh, morph: mesh.morphTargetDictionary || {},
+    bones: { head: find('頭'), neck: find('首'), upper: find('上半身'), upper2: find('上半身2'), lArm: find('左腕'), rArm: find('右腕'), lElbow: find('左ひじ'), rElbow: find('右ひじ'),
+      lLeg: find('左足'), rLeg: find('右足'), lKnee: find('左ひざ'), rKnee: find('右ひざ'), lAnk: find('左足首'), rAnk: find('右足首'),
+      lLegD: find('左足D'), rLegD: find('右足D'), lKneeD: find('左ひざD'), rKneeD: find('右ひざD'), lAnkD: find('左足首D'), rAnkD: find('右足首D') },
+    walk: { active: false, tx: 0, tz: 0, phase: 0, blend: 0, fast: false, ground: null },
+    sl: { wake: false, active: false, eyes: 0, bow: 0, sway: 0, yawn: 0, hands: 0, rub: 0 },
+    life: { state: 'free', t0: 0, cool: 10, lock: false, hinted: {}, lie: 0, lieT: 0, eyes: 0, spot: null, from: null, fromFace: 0, tries: 0, zi: -1, save: 0, foodS: 1, waterS: 1 },
+    act: { kind: '', u: 0, chew: 0, nod: 0, tilt: 0 }, needs: { hunger: 100, thirst: 100, energy: 100 },
+    mouth: [0, 0, 0, 0, 0], speech: { until: 0, next: 0, v: 0, amp: 0 }, look: { x: 0, y: 0 }, wander: { x: 0, y: 0, next: 0 }, auto: { wait: 2, lastTouch: -99 },
+    home: 0, mood: { type: 'calm', until: 0 }, mk: { angry: 0, sad: 0, happy: 0 }, nodStart: -1, waveStart: -1, sleepStart: -1, sleepLines: [], lifeLines: [], elbowUsed: false, socialCool: 20, blinkOff: Math.random() * 4, bubbleUntil: 0 };
+  c.bubble = document.createElement('div'); c.bubble.className = 'bubble'; c.bubble.dataset.n = name; c.bubble.style.setProperty('--c', c.p.color); document.body.appendChild(c.bubble);
+  c.shadow = new THREE.Mesh(new THREE.CircleGeometry(H * 0.5, 24), new THREE.MeshBasicMaterial({ map: blobTex, transparent: true, depthWrite: false }));
+  c.shadow.rotation.x = -Math.PI / 2; c.shadow.position.y = 0.12; scene.add(c.shadow);
+  try { const d = JSON.parse(localStorage.getItem('mmd-needs-' + name) || 'null');
+    if (d) { const e = Math.min(900, (Date.now() - d.ts) / 1000) * 0.5; for (const k in c.needs) if (typeof d[k] === 'number') c.needs[k] = Math.max(Math.min(d[k], 60), d[k] - c.p.rate[k] * e); } } catch (e) {}
+  return c;
+}
+function removeChar(c) {
+  scene.remove(c.mesh); helper.remove(c.mesh); scene.remove(c.shadow); c.bubble.remove();
+  [spots.food, spots.water, ...spots.beds].forEach(s => { if (s.by === c) s.by = null; });
+  chars.splice(chars.indexOf(c), 1); if (selected === c) selected = chars[0] || null;
+  if (chat.on && (chat.a === c || chat.b === c)) endChat(clock.elapsedTime, 5);
+}
+function homeOf(name) { const n = name.toLowerCase(); if (n === 'rafayel') return 0; if (n === 'xavier') return 3; const k = [0, 0]; chars.forEach(c => k[c.home ? 1 : 0]++); return k[0] <= k[1] ? 0 : 3; }
+function addChar(name, files) {   // files: Map(namaFileHurufKecil -> Blob)
+  return new Promise((resolve) => {
+    const old = chars.find(c => c.name.toLowerCase() === name.toLowerCase()); if (old) removeChar(old);
+    const fileMap = {}; let pmx = null;
+    for (const [fn, blob] of files) { const u = URL.createObjectURL(blob); fileMap[fn] = u; if (/\.pmx$/.test(fn)) pmx = u + '#.pmx'; }
+    if (!pmx) { flash('File pmx untuk ' + name + ' belum ada.'); return resolve(null); }
+    const mgr = new THREE.LoadingManager();
+    mgr.setURLModifier((url) => {
+      if (url.startsWith('data:')) return url;
+      const n = decodeURIComponent(url.split(/[\\/]/).pop()).toLowerCase();
+      return fileMap[n] || fileMap[n.replace(/\.bmp$/, '.jpg')] || url;
+    });
+    msg.textContent = 'Memuat ' + name + '…';
+    new MMDLoader(mgr).load(pmx, (mesh) => {
+      const box = new THREE.Box3().setFromObject(mesh);
+      mesh.scale.setScalar(H / Math.max(0.01, box.max.y - box.min.y));   // samakan tinggi semua karakter
+      mesh.rotation.order = 'YXZ';
+      const home = homeOf(name);
+      let x = roomCx(home) + (Math.random() - 0.5) * H, z = H * 1.1;
+      for (let n = 0; n < 20 && blocked(x, z); n++) { x = roomCx(home) + (Math.random() - 0.5) * RW * 0.6; z = (Math.random() * 2 - 1) * WZ * 0.6; }
+      mesh.position.set(x, 0, z); scene.add(mesh); helper.add(mesh, { physics: false }); mesh.updateMatrixWorld(true);
+      const c = makeChar(name, mesh); c.home = home;
+      const gL = c.bones.lAnkD || c.bones.lAnk, gR = c.bones.rAnkD || c.bones.rAnk;
+      if (gL && gR) { const v = new THREE.Vector3(); c.walk.ground = Math.min(gL.getWorldPosition(v).y, gR.getWorldPosition(v).y); }
+      chars.push(c); if (!selected) selected = c;
+      flash(name + ' masuk ke ruangan.'); $('ui').style.display = 'none'; resolve(c);
+    }, (e) => { if (e.lengthComputable) msg.textContent = 'Memuat ' + name + '… ' + Math.round(e.loaded / e.total * 100) + '%'; },
+    (err) => { console.error(err); flash('Gagal memuat ' + name + ': ' + (err && err.message ? err.message : err), 6000); resolve(null); });
+  });
+}
+
+// ---------- Teks (bubble, tanpa suara) ----------
+function say(c, text, secs = 0, moveMouth = true) {
+  if (!text) return;
+  const t = clock.elapsedTime; secs = secs || Math.max(1.8, text.length * 0.07 + 1);
+  c.bubble.textContent = text; c.bubbleUntil = t + secs;
+  if (moveMouth) c.speech.until = t + Math.min(secs, text.length * 0.07 + 0.4);
+}
+const _bv = new THREE.Vector3();
+function updateBubble(c, t) {
+  if (!c.mesh || t > c.bubbleUntil) { c.bubble.style.opacity = 0; return; }
+  if (c.bones.head) c.bones.head.getWorldPosition(_bv); else _bv.set(c.mesh.position.x, H * 0.9, c.mesh.position.z);
+  _bv.y += H * 0.14; _bv.project(camera);
+  c.bubble.style.left = Math.max(70, Math.min(innerWidth - 70, (_bv.x * 0.5 + 0.5) * innerWidth)) + 'px';
+  c.bubble.style.top = Math.max(60, (-_bv.y * 0.5 + 0.5) * innerHeight) + 'px';
+  c.bubble.style.opacity = 1;
+}
+
+// ---------- Gerak dasar ----------
+const ptr = { x: 0, y: 0, last: -99 };
+function nodAmount(c, t) { if (c.nodStart < 0) return 0; const p = (t - c.nodStart) / 2.2; if (p >= 2) { c.nodStart = -1; return 0; } return Math.pow(Math.sin(Math.PI * (p % 1)), 2); }
+function waveAmount(c, t) { if (c.waveStart < 0) return 0; const p = (t - c.waveStart) / 2.6; if (p >= 1) { c.waveStart = -1; return 0; } return Math.min(1, Math.sin(Math.PI * p) * 2.2); }
+function greet(c, quiet = false) {
+  if (!c.mesh || c.sl.active || c.life.lock) return;
+  idleBox.checked = true; c.nodStart = c.waveStart = clock.elapsedTime;
+  if (!quiet) say(c, T(c, 'greet'));
+}
+function idle(c, t, dt) {
+  const { head, neck, upper, lArm, rArm } = c.bones, nod = nodAmount(c, t) * NOD_DIR;
+  let tx = 0, ty = 0;
+  if (followBox.checked && t - ptr.last < 4) { tx = ptr.x; ty = ptr.y * 0.6; }
+  else { if (t > c.wander.next) { c.wander.x = (Math.random() - 0.5) * 0.9; c.wander.y = (Math.random() - 0.5) * 0.4; c.wander.next = t + 2 + Math.random() * 4; } tx = c.wander.x; ty = c.wander.y; }
+  const k = 1 - Math.exp(-6 * dt); c.look.x += (tx - c.look.x) * k; c.look.y += (ty - c.look.y) * k;
+  const lx = c.look.x * LOOK_X_DIR, ly = c.look.y * LOOK_Y_DIR;
+  if (upper) upper.rotation.x = Math.sin(t * 1.6) * 0.02 + nod * 0.08;
+  if (neck) { neck.rotation.y = lx * 0.25; neck.rotation.x = ly * 0.1 + nod * 0.15; }
+  if (head) { head.rotation.z = 0; head.rotation.y = lx * 0.45; head.rotation.x = ly * 0.25 + Math.sin(t * 0.9) * 0.02 + nod * 0.3; }
+  const a = parseFloat(armSlider.value), w = waveAmount(c, t);
+  if (lArm) lArm.rotation.z = a;
+  if (rArm) rArm.rotation.z = -a + w * (a + 0.9) + Math.sin(t * 11) * 0.12 * w;
+  const bi = c.morph['まばたき'];
+  if (bi !== undefined) c.mesh.morphTargetInfluences[bi] = ((t + c.blinkOff) % 4) > 3.8 ? 1 : 0;
+}
+function walkTo(c, pt, fast = false, silent = false, force = false) {
+  if (!c || !c.mesh || c.sl.active || (c.life.lock && !force)) return;
+  if (blocked(pt.x, pt.z)) { if (!silent) flash('Di situ ada perabot atau dinding, coba bagian lantai lain.'); return; }
+  c.walk.active = true; c.walk.fast = fast; c.walk.tx = pt.x; c.walk.tz = pt.z;
+  c.walk.via = route(c.mesh.position.x, pt.x);   // beda ruangan: lewat pintu satu per satu
+  if (c === selected && (!silent || fast)) { marker.position.set(pt.x, 0.15, pt.z); marker.visible = true; }
+}
+const idleKey = (c) => ({ angry: 'idleAngry', sad: 'idleSad', happy: 'idleHappy' }[c.mood.type] || 'idle');
+function pickRandomSpot(c) {
+  const upset = c.mood.type === 'angry' || c.mood.type === 'sad', r = upset || Math.random() < 0.5 ? c.home : Math.floor(Math.random() * NR);   // yang lagi ngambek tetap di kamarnya
+  for (let i = 0; i < 14; i++) {
+    const x = roomCx(r) + (Math.random() * 2 - 1) * (RW / 2 - H * 0.6), z = (Math.random() * 2 - 1) * (WZ - H * 0.6);
+    if (blocked(x, z) || Math.hypot(x - c.mesh.position.x, z - c.mesh.position.z) < H * 0.8) continue;
+    walkTo(c, { x, z }, false, true); return;
+  }
+}
+function updateAuto(c, t, dt) {
+  const a = c.auto;
+  if (!autoBox.checked || c.walk.active || c.sl.active || c.life.lock) { a.wait = 1.5 + Math.random() * 4; return; }
+  if (t - a.lastTouch < 5) return;
+  a.wait -= dt; if (a.wait > 0) return;
+  a.wait = 1.5 + Math.random() * 4;
+  const r = Math.random(), L = lifeBox.checked;
+  if (r < 0.08) greet(c, true);
+  else if (r < 0.16) c.nodStart = t;
+  else if (r < 0.2 && L) startStretch(c);
+  else if (r < 0.2 + 0.03 * c.p.talk && L) say(c, T(c, idleKey(c)));
+  else pickRandomSpot(c);
+}
+function updateWalk(c, dt) {
+  const { mesh, walk, bones } = c, p = mesh.position;
+  if (walk.active) {
+    const via = walk.via && walk.via[0], dx = (via ? via.x : walk.tx) - p.x, dz = (via ? via.z : walk.tz) - p.z, dist = Math.hypot(dx, dz);
+    if (dist < H * 0.08) { if (via) walk.via.shift(); else { walk.active = false; walk.fast = false; if (c === selected) marker.visible = false; } }
+    else {
+      let diff = Math.atan2(dx, dz) - mesh.rotation.y; diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+      mesh.rotation.y += diff * (1 - Math.exp(-9 * dt));
+      if (Math.abs(diff) < 0.9) {
+        const step = Math.min(dist, H * (walk.fast ? 1.3 : 0.8) * (c.mood.type === 'angry' ? 1.35 : 1) * dt);
+        let nx = p.x + dx / dist * step, nz = p.z + dz / dist * step;
+        const hit = (x, z) => blocked(x, z) || chars.some(o => { if (o === c || !o.mesh) return false; const d = Math.hypot(x - o.mesh.position.x, z - o.mesh.position.z); return d < H * 0.4 && d < Math.hypot(p.x - o.mesh.position.x, p.z - o.mesh.position.z); });
+        if (hit(nx, nz)) { if (!hit(nx, p.z)) nz = p.z; else if (!hit(p.x, nz)) nx = p.x; else { nx = p.x; nz = p.z; walk.active = false; } }
+        const moved = Math.hypot(nx - p.x, nz - p.z); p.x = nx; p.z = nz; walk.phase += moved * (Math.PI * 2 / (H * 0.6));
+      }
+    }
+  }
+  walk.blend += ((walk.active ? 1 : 0) - walk.blend) * (1 - Math.exp(-10 * dt)); if (walk.blend < 0.001 && !walk.active) walk.blend = 0;
+  const { lLeg, rLeg, lKnee, rKnee, lAnk, rAnk, upper, lArm, rArm } = bones, LEG = legFlip.checked ? -1 : 1, b = walk.blend;
+  const leg = (hips, knees, anks, ph) => {
+    const h = LEG * Math.sin(ph) * 0.6 * b, k = -LEG * Math.max(0, Math.cos(ph)) * 0.8 * b, an = -(h + k) * 0.7;
+    hips.forEach(x => { if (x) x.rotation.x = h; }); knees.forEach(x => { if (x) x.rotation.x = k; }); anks.forEach(x => { if (x) x.rotation.x = an; });
+  };
+  leg([lLeg, bones.lLegD], [lKnee, bones.lKneeD], [lAnk, bones.lAnkD], walk.phase);
+  leg([rLeg, bones.rLegD], [rKnee, bones.rKneeD], [rAnk, bones.rAnkD], walk.phase + Math.PI);
+  const swing = LEG * Math.sin(walk.phase) * 0.55 * b;
+  if (lArm) lArm.rotation.x = -swing; if (rArm) rArm.rotation.x = swing;
+  if (upper) { upper.rotation.z = Math.sin(walk.phase) * 0.04 * b; upper.rotation.y = -Math.sin(walk.phase) * 0.1 * b; }
+  p.y = 0;
+  const gL = bones.lAnkD || lAnk, gR = bones.rAnkD || rAnk;
+  if (walk.ground !== null && gL && gR && b > 0.001) { mesh.updateMatrixWorld(true); const v = new THREE.Vector3();
+    p.y = Math.max(-H * 0.25, Math.min(H * 0.25, walk.ground - Math.min(gL.getWorldPosition(v).y, gR.getWorldPosition(v).y))); }
+  c.shadow.position.set(p.x, 0.12, p.z);
+}
+function faceTo(c, ang, dt) { let d = ang - c.mesh.rotation.y; d = Math.atan2(Math.sin(d), Math.cos(d)); c.mesh.rotation.y += d * (1 - Math.exp(-8 * dt)); }
+
+// ---------- Ngantuk ----------
+function startSleepy(c, wake = false) {
+  if (!c.mesh || c.sl.active) return;
+  idleBox.checked = true; c.walk.active = false; if (c === selected) marker.visible = false;
+  c.sleepStart = clock.elapsedTime - (wake ? 6.0 : 0);
+  c.sleepLines = [{ at: 0.3, text: T(c, 'drowsy'), dur: 3.4 }, { at: 4.3, text: 'zzz…', dur: 1.6 }, { at: 6.05, text: T(c, 'jolt'), dur: 2.2 }, { at: 7.3, text: 'Hoaaam…', dur: 3.2 }, { at: 11.8, text: T(c, 'wakeEnd'), dur: 2.6 }];
+  c.sl.wake = wake; if (wake) c.sleepLines.forEach(e => { if (e.at < 6.5) e.done = true; });
+  c.sl.active = true;
+}
+function sleepyUpdate(c, t) {
+  const sl = c.sl; if (!sl.active) return;
+  const s = t - c.sleepStart;
+  if (s > SLEEP_LEN) { sl.active = false; sl.eyes = sl.bow = sl.sway = sl.yawn = sl.hands = sl.rub = 0; return; }
+  for (const e of c.sleepLines) if (!e.done && s >= e.at) { e.done = true; say(c, e.text, e.dur, false); }
+  let eyes;
+  if (s < 6.0) { eyes = ss(0.6, 2.6, s); if (s > 3.0 && s < 3.7) eyes -= 0.4 * Math.sin(Math.PI * (s - 3.0) / 0.7); }
+  else if (s < 6.9) eyes = 1 - ss(6.0, 6.15, s);
+  else eyes = ss(6.9, 7.2, s) * (1 - ss(10.8, 11.2, s));
+  const yawn = ss(7.3, 8.3, s) * (1 - ss(9.8, 10.7, s));
+  let bow;
+  if (s < 6.0) bow = 0.08 * ss(0, 2, s) + 0.5 * ss(2, 4.5, s) + 0.55 * Math.pow(ss(4.5, 6.0, s), 2);
+  else if (s < 6.3) bow = sl.wake ? 0.1 : 1.13 + (0.1 - 1.13) * ss(6.0, 6.3, s);
+  else bow = 0.1 * (1 - ss(6.5, 7.5, s)) - 0.12 * yawn;
+  sl.eyes = eyes; sl.bow = bow; sl.yawn = yawn;
+  sl.sway = Math.sin(s * 1.4) * ss(1, 3, s) * (1 - ss(5.9, 6.2, s));
+  sl.hands = ss(6.6, 7.3, s) * (1 - ss(10.8, 11.6, s));
+  sl.rub = Math.sin((s - 7.3) * 13) * ss(7.3, 7.8, s) * (1 - ss(10.2, 10.8, s));
+}
+function sleepyApply(c) {   // setelah idle & jalan: gerakan khusus menimpa pose biasa
+  const { mesh, sl, life, act } = c, { upper, upper2, neck, head, lArm, rArm, lElbow, rElbow } = c.bones;
+  const L = life.lie, b = sl.active ? sl.bow * BOW_DIR : 0, a = parseFloat(armSlider.value), f = ARM_FWD_DIR;
+  mesh.rotation.x = L > 0.001 ? -Math.PI / 2 * L : b * 0.05;
+  if (L > 0.001 && life.from && life.bed) {
+    const B = life.bed; mesh.rotation.y = life.fromFace * (1 - L);
+    mesh.position.set(life.from.x + (B.lieX - life.from.x) * L, B.lieY * L, life.from.z + (B.lieZ - life.from.z) * L);
+  }
+  let elb = false;
+  if (sl.active) {
+    if (upper) { upper.rotation.x += b * 0.15; upper.rotation.z += sl.sway * 0.08; }
+    if (upper2) upper2.rotation.x += b * 0.08;
+    if (neck) neck.rotation.x += b * 0.15 - sl.yawn * 0.08;
+    if (head) { head.rotation.x += b * 0.25 - sl.yawn * 0.2; head.rotation.z += sl.sway * 0.06; }
+    const h = sl.hands, r = sl.rub;
+    if (h > 0.001) {
+      if (lArm) { lArm.rotation.z = a + (0.3 - a) * h + 0.1 * r; lArm.rotation.x = -1.25 * f * h + 0.08 * r; }
+      if (rArm) { rArm.rotation.z = -a + (-0.3 + a) * h - 0.1 * r; rArm.rotation.x = -1.25 * f * h - 0.08 * r; }
+      const e = ELBOW_DIR * (1.7 * h + 0.18 * r);
+      if (lElbow) lElbow.rotation[ELBOW_AXIS] = -e; if (rElbow) rElbow.rotation[ELBOW_AXIS] = e; elb = true;
+    }
+  }
+  const eyes = Math.max(sl.active ? sl.eyes : 0, life.eyes), bi = c.morph['まばたき'];
+  if (bi !== undefined && eyes > 0) mesh.morphTargetInfluences[bi] = Math.max(mesh.morphTargetInfluences[bi], eyes);
+  if ((act.kind === 'eat' || act.kind === 'drink') && act.u > 0.001) {
+    const u = act.u;
+    if (rArm) { rArm.rotation.z = -a + (-0.3 + a) * u; rArm.rotation.x = -1.25 * f * u; }
+    if (rElbow) rElbow.rotation[ELBOW_AXIS] = ELBOW_DIR * 1.7 * u; elb = true;
+  }
+  if (act.kind === 'eat' && head) head.rotation.x += act.nod;
+  if (act.kind === 'drink' && head) head.rotation.x -= act.tilt * 0.3;
+  if (act.kind === 'stretch') {
+    const u = act.u;
+    if (lArm) lArm.rotation.z = a + (-1.5 - a) * u; if (rArm) rArm.rotation.z = -a + (1.5 + a) * u;
+    if (upper) upper.rotation.x -= 0.12 * u; if (head) head.rotation.x -= 0.2 * u;
+  }
+  if (!elb && c.elbowUsed) [lElbow, rElbow].forEach(e => { if (e) e.rotation.set(0, 0, 0); });
+  c.elbowUsed = elb;
+}
+
+// ---------- Kebutuhan: lapar, haus, tidur ----------
+function shrink(m, k) { if (m) { m.scale.setScalar(Math.max(0.05, k)); m.position.y = m.userData.y0 - m.userData.hh * (1 - k); } }
+function setLines(c, a) { c.lifeLines = a.map(x => ({ ...x })); }
+function goTo(c, state, spot) {
+  const L = c.life; L.state = state; L.spot = spot; spot.by = c; L.t0 = clock.elapsedTime; L.tries = 0; L.lock = true;
+  walkTo(c, { x: spot.x, z: spot.z }, false, true, true);
+}
+function lifeDone(c, t, cool) {
+  const L = c.life; if (L.spot && L.spot.by === c) L.spot.by = null; L.spot = null; L.bed = null;
+  L.state = 'free'; L.lock = false; L.cool = t + cool; Object.assign(c.act, { kind: '', u: 0, chew: 0, nod: 0, tilt: 0 });
+}
+function startStretch(c) {
+  if (c.life.state !== 'free' || c.sl.active || !c.mesh) return;
+  c.life.state = 'stretch'; c.life.lock = true; c.life.t0 = clock.elapsedTime; c.walk.active = false; setLines(c, [{ at: 0.4, text: T(c, 'stretch'), dur: 2.6 }]);
+}
+function lifeUpdate(c, t, dt) {
+  const { needs, life, act, sl } = c, sp = dt * SPEED, asleep = life.state === 'sleep' || life.state === 'lie', R = c.p.rate;
+  needs.hunger = Math.max(0, needs.hunger - R.hunger * sp * (asleep ? 0.3 : 1));
+  needs.thirst = Math.max(0, needs.thirst - R.thirst * sp * (asleep ? 0.3 : 1));
+  needs.energy = asleep ? Math.min(100, needs.energy + 1.6 * sp) : Math.max(0, needs.energy - R.energy * sp);
+  life.lie += (life.lieT - life.lie) * (1 - Math.exp(-2.5 * dt));
+  if (life.state !== 'eat') life.foodS += (1 - life.foodS) * dt * 0.04;
+  if (life.state !== 'drink') life.waterS += (1 - life.waterS) * dt * 0.04;
+  if (t > life.save) { life.save = t + 5 + Math.random(); try { localStorage.setItem('mmd-needs-' + c.name, JSON.stringify({ ...needs, ts: Date.now() })); } catch (e) {} }
+  if (!lifeBox.checked) return;
+  const S = life.state, s = t - life.t0, sp0 = life.spot;
+  for (const e of c.lifeLines) if (!e.done && s >= e.at) { e.done = true; say(c, e.text, e.dur, false); }
+
+  if (S === 'free') {
+    if (sl.active || t < life.cool || t - c.auto.lastTouch < 4) return;
+    for (const k in needs) if (needs[k] > HINT + 20) life.hinted[k] = false;
+    const low = Object.keys(needs).filter(k => needs[k] < LOW).sort((x, y) => needs[x] - needs[y])[0];
+    const busy = (sp) => sp.by && sp.by !== c, own = spots.beds[c.home ? 1 : 0], bed = own.by && own.by !== c ? spots.beds.find(b => !b.by) : own;
+    if (low === 'hunger') { if (busy(spots.food)) { say(c, T(c, 'wait'), 2.5, false); life.cool = t + 8; } else { say(c, T(c, 'goHungry'), 2.5, false); goTo(c, 'toFood', spots.food); } }
+    else if (low === 'thirst') { if (busy(spots.water)) { say(c, T(c, 'wait'), 2.5, false); life.cool = t + 8; } else { say(c, T(c, 'goThirsty'), 2.5, false); goTo(c, 'toWater', spots.water); } }
+    else if (low === 'energy') { if (!bed) { say(c, T(c, 'wait'), 2.5, false); life.cool = t + 8; } else { say(c, T(c, 'goSleep'), 2.8, false); life.bed = bed; goTo(c, 'toBed', bed); } }
+    else if (needs.energy < HINT && !life.hinted.energy) { life.hinted.energy = true; startSleepy(c); }
+    else if (needs.hunger < HINT && !life.hinted.hunger) { life.hinted.hunger = true; say(c, T(c, 'hintHungry'), 3, false); }
+    else if (needs.thirst < HINT && !life.hinted.thirst) { life.hinted.thirst = true; say(c, T(c, 'hintThirsty'), 3, false); }
+    return;
+  }
+  if (S === 'toChat' || S === 'listen') return;   // diatur chatUpdate
+  if (S === 'toFood' || S === 'toWater' || S === 'toBed') {
+    if (c.walk.active) return;
+    if (Math.hypot(sp0.x - c.mesh.position.x, sp0.z - c.mesh.position.z) < H * 0.2) {
+      c.mesh.position.x = sp0.x; c.mesh.position.z = sp0.z; life.from = { x: sp0.x, z: sp0.z }; life.t0 = t;
+      if (S === 'toBed') { life.state = 'lie'; life.bed = sp0; life.fromFace = sp0.face; life.lieT = 1; life.eyes = 1; setLines(c, [{ at: 0.2, text: T(c, 'sleepIn'), dur: 2.4 }]); }
+      else if (S === 'toFood') { life.state = 'eat'; setLines(c, [{ at: 0.3, text: T(c, 'eatStart'), dur: 3.5 }, { at: 7.4, text: T(c, 'eatEnd'), dur: 2.2 }]); }
+      else { life.state = 'drink'; setLines(c, [{ at: 0.3, text: T(c, 'drinkStart'), dur: 3 }, { at: 4.8, text: T(c, 'drinkEnd'), dur: 2 }]); }
+    } else if (++life.tries > 3 || s > 40) lifeDone(c, t, 15);
+    else walkTo(c, { x: sp0.x, z: sp0.z }, false, true, true);
+    return;
+  }
+  if (S === 'eat') {
+    faceTo(c, sp0.face, dt); act.kind = 'eat';
+    const k = 0.5 - 0.5 * Math.cos(s * Math.PI * 2 / 1.7);
+    act.u = k * ss(0.2, 0.9, s) * (1 - ss(7.4, 8.2, s)); act.nod = 0.12 * k * act.u;
+    act.chew = k < 0.35 && s > 0.8 && s < 8 ? 0.2 + 0.2 * Math.abs(Math.sin(s * 12)) : 0;
+    needs.hunger = Math.min(100, needs.hunger + dt * 80 / 9.5); life.foodS = Math.max(0.12, 1 - 0.88 * s / 8);
+    if (s > 9.6) lifeDone(c, t, 8);
+    return;
+  }
+  if (S === 'drink') {
+    faceTo(c, sp0.face, dt); act.kind = 'drink';
+    act.u = ss(0.4, 1.3, s) * (1 - ss(3.9, 4.8, s)); act.tilt = act.u; act.chew = act.u > 0.8 ? 0.15 * Math.abs(Math.sin(s * 9)) : 0;
+    needs.thirst = Math.min(100, needs.thirst + dt * 80 / 6.8); life.waterS = Math.max(0.12, 1 - 0.85 * s / 4.5);
+    if (s > 6.8) lifeDone(c, t, 8);
+    return;
+  }
+  if (S === 'stretch') { act.kind = 'stretch'; act.u = ss(0, 1.2, s) * (1 - ss(2.8, 4, s)); if (s > 4) lifeDone(c, t, 10); return; }
+  if (S === 'lie') { if (s > 2.6) { life.state = 'sleep'; life.t0 = t; life.zi = -1; } return; }
+  if (S === 'sleep') {
+    const zi = Math.floor(s / 2.6);
+    if (zi !== life.zi) { life.zi = zi; say(c, 'z'.repeat(zi % 3 + 1) + '…', 2.3, false); }
+    if (needs.energy >= 100) { life.state = 'wake'; life.t0 = t; life.lieT = 0; life.eyes = 0; startSleepy(c, true); }
+    return;
+  }
+  if (S === 'wake' && !sl.active) { life.hinted = {}; lifeDone(c, t, 30); }
+}
+
+// ---------- Ngobrol antar karakter ----------
+const chat = { on: false, a: null, b: null, phase: '', t0: 0, i: 0, next: 0, lines: [] };
+let nextSocial = 15;
+function endChat(t, cool, done) {
+  [chat.a, chat.b].forEach(c => { if (c && c.mesh && (c.life.state === 'toChat' || c.life.state === 'listen')) { c.life.state = 'free'; c.life.lock = false; c.life.cool = t + 3; c.socialCool = t + cool; } });
+  const A = chat.a, B = chat.b, k = chat.kind; chat.on = false;
+  if (!done || !A || !B || !A.mesh || !B.mesh) return;
+  if (k === 'fight') { setMood(A, 'angry', 50 + Math.random() * 30); setMood(B, Math.random() < B.p.temper + 0.25 ? 'angry' : 'sad', 50 + Math.random() * 30); addRel(A, B, -15); retreat(A); retreat(B); }
+  else if (k === 'comfort') { setMood(B, 'happy', 25); setMood(A, 'calm', 0); addRel(A, B, 12); }
+  else if (k === 'reconcile') { if (chat.ok) { setMood(A, 'happy', 30); setMood(B, 'happy', 30); addRel(A, B, 20); } else { setMood(A, 'sad', 40); addRel(A, B, -3); retreat(A); } }
+  else addRel(A, B, 3);
+}
+function tryStartChat(t) {
+  const el = chars.filter(c => c.mesh && c.life.state === 'free' && !c.sl.active && t > c.socialCool);
+  if (el.length < 2) return;
+  const total = el.reduce((s, c) => s + c.p.talk, 0); let r = Math.random() * total;
+  const A = el.find(c => (r -= c.p.talk) < 0) || el[0], B = pick(el.filter(c => c !== A));
+  const sleeper = chars.find(c => c !== A && c.life.state === 'sleep');
+  if (sleeper && Math.random() < 0.5) { say(A, T(A, 'seeSleeper', sleeper)); A.socialCool = t + 25; return; }   // komentar untuk yang tidur
+  const kind = pickKind(A, B); if (!kind) { A.socialCool = t + 15; return; }
+  Object.assign(chat, { on: true, a: A, b: B, phase: 'walk', t0: t, i: 0, next: 0, lines: [], kind, ok: Math.random() < 0.45 + getRel(A, B) / 250 + B.p.kind * 0.25 });
+  A.life.state = 'toChat'; B.life.state = 'listen'; A.life.lock = B.life.lock = true; A.walk.active = B.walk.active = false;
+  const bp = B.mesh.position; let ax = A.mesh.position.x - bp.x, az = A.mesh.position.z - bp.z; const d = Math.hypot(ax, az) || 1; ax /= d; az /= d;
+  for (let i = 0; i < 9; i++) {
+    const ang = (i % 2 ? 1 : -1) * Math.ceil(i / 2) * 0.6, cs = Math.cos(ang), sn = Math.sin(ang);
+    const x = bp.x + (ax * cs - az * sn) * H * 1.0, z = bp.z + (ax * sn + az * cs) * H * 1.0;
+    if (!blocked(x, z) && roomIdx(x) === roomIdx(bp.x)) { walkTo(A, { x, z }, false, true, true); return; }
+  }
+  endChat(t, 10);
+}
+function buildLines(A, B, kind) {
+  const t = (c, k, o) => [c, T(c, k, o)];
+  if (kind === 'fight') return [t(A, 'fightStart', B), t(B, 'fightReply', A), t(A, 'fight2', B), t(B, 'fightReply', A), t(A, 'fightEnd', B)];
+  if (kind === 'comfort') return [t(A, 'comfortStart', B), t(B, 'sadReply', A), t(A, 'comfort', B), t(B, 'thanks', A), t(A, 'comfortEnd', B)];
+  if (kind === 'reconcile') return chat.ok ? [t(A, 'apologize', B), t(B, 'forgive', A), t(A, 'relieved', B)] : [t(A, 'apologize', B), t(B, 'refuse', A), t(A, 'idleSad')];
+  const L = [[A, T(A, 'chatStart', B)], [B, B.needs.energy < 40 ? T(B, 'sleepyReply', A) : T(B, 'reply', A)], [A, T(A, 'chat', B)], [B, T(B, 'reply2', A)]];
+  if (Math.random() < 0.6) L.push([A, T(A, 'chat', B)], [B, T(B, 'reply', A)]);
+  L.push([A, T(A, 'bye', B)]); return L;
+}
+// ---------- Hubungan & suasana hati ----------
+const rels = {}, rk = (a, b) => [a.name, b.name].sort().join('|');
+const getRel = (a, b) => rels[rk(a, b)] ?? 20, addRel = (a, b, d) => { rels[rk(a, b)] = Math.max(-100, Math.min(100, getRel(a, b) + d)); };
+const ICON = { angry: ' 💢', sad: ' 💧', happy: ' 💕', calm: '' };
+function setMood(c, type, secs) { c.mood.type = type; c.mood.until = clock.elapsedTime + secs; c.bubble.dataset.n = c.name + ICON[type]; }
+function retreat(c) {   // pergi (cepat) ke kamarnya sendiri
+  for (let i = 0; i < 10; i++) { const x = roomCx(c.home) + (Math.random() * 2 - 1) * (RW / 2 - H * 0.8), z = (Math.random() * 2 - 1) * (WZ - H * 0.8);
+    if (!blocked(x, z)) { c.auto.lastTouch = -99; walkTo(c, { x, z }, true, true); return; } }
+}
+function pickKind(A, B) {
+  const r = getRel(A, B), R = Math.random(), up = (c) => c.mood.type === 'angry' || c.mood.type === 'sad';
+  if (up(A)) return A.mood.type === 'angry' && R > 0.35 + A.p.kind * 0.5 ? 'fight' : 'reconcile';
+  if (B.mood.type === 'sad') return R < 0.4 + A.p.kind * 0.5 ? 'comfort' : '';
+  if (B.mood.type === 'angry') return R < 0.3 + A.p.kind * 0.6 ? 'reconcile' : '';
+  return R < A.p.temper * (0.5 - r / 200) ? 'fight' : 'chat';
+}
+const MOOD_MORPH = { angry: ['怒り'], sad: ['悲しい', '困る'], happy: ['にこり', '笑い'] };
+function moodApply(c, t, dt) {
+  const m = c.mood, mk = c.mk, k = 1 - Math.exp(-4 * dt);
+  if (m.type !== 'calm' && t > m.until) setMood(c, 'calm', 0);
+  for (const key in mk) { mk[key] += ((m.type === key ? 1 : 0) - mk[key]) * k;
+    const idx = MOOD_MORPH[key].map(n => c.morph[n]).find(i => i !== undefined); if (idx !== undefined) c.mesh.morphTargetInfluences[idx] = mk[key] * 0.85; }
+  const { upper, neck, head } = c.bones, A = mk.angry, S = mk.sad, Hp = mk.happy, g = 1 - Math.min(1, c.life.lie * 3);
+  if (upper) { upper.rotation.x += (0.08 * A + 0.1 * S + Math.sin(t * 3) * 0.03 * Hp) * g; upper.rotation.z += Math.sin(t * 28) * 0.025 * A * g; }
+  if (neck) neck.rotation.x += 0.15 * S * g;
+  if (head) { head.rotation.x += (0.12 * A + 0.35 * S) * g; head.rotation.z += Math.sin(t * 2.2) * 0.06 * Hp * g; head.rotation.y += Math.sin(t * 25) * 0.03 * A * g; }
+}
+function camUpdate(dt) {
+  if (selected && selected.mesh) { const x = selected.mesh.position.x, i = roomIdx(x); if (i !== camRoom && Math.abs(x - roomCx(camRoom)) > RW / 2 + 8) camRoom = i; }
+  const want = camera.aspect < 1.2 ? roomCx(camRoom) : 0, d = (want - camShift) * (1 - Math.exp(-3 * dt));
+  camShift += d; controls.target.x += d; camera.position.x += d;
+}
+function chatUpdate(t, dt) {
+  if (!chat.on) { if (lifeBox.checked && t > nextSocial) { nextSocial = t + 14 + Math.random() * 20; tryStartChat(t); } return; }
+  const A = chat.a, B = chat.b;
+  if (!A.mesh || !B.mesh || !lifeBox.checked) return endChat(t, 10);
+  const ap = A.mesh.position, bp = B.mesh.position;
+  faceTo(B, Math.atan2(ap.x - bp.x, ap.z - bp.z), dt);
+  if (chat.phase === 'walk') {
+    if (A.walk.active) return;
+    if (Math.hypot(ap.x - bp.x, ap.z - bp.z) < H * 1.5) { chat.phase = 'talk'; chat.lines = buildLines(A, B, chat.kind); if (chat.kind === 'fight') { setMood(A, 'angry', 90); setMood(B, 'angry', 90); } chat.next = t + 0.3; A.waveStart = t; }
+    else endChat(t, 10);
+    return;
+  }
+  faceTo(A, Math.atan2(bp.x - ap.x, bp.z - ap.z), dt);
+  if (t < chat.next) return;
+  if (chat.i >= chat.lines.length) return endChat(t, 40, true);
+  const [who, text] = chat.lines[chat.i++], other = who === A ? B : A, dur = Math.max(2.4, text.length * 0.065 + 1);
+  say(who, text, dur, true); if (chat.kind !== 'fight') other.nodStart = t; if (chat.kind === 'fight' || (who.p.talk > 2 && Math.random() < 0.4)) who.waveStart = t;
+  chat.next = t + dur + 0.5;
+}
+
+// ---------- Sentuhan ----------
+const ray = new THREE.Raycaster();
+const ndc = (e) => new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+function floorPoint(e) { ray.setFromCamera(ndc(e), camera); const h = ray.intersectObject(floorMesh); return h.length ? h[0].point : null; }
+function pickChar(e) {
+  ray.setFromCamera(ndc(e), camera); let best = null, bd = 1e9;
+  for (const c of chars) { const h = ray.intersectObject(c.mesh, true); if (h.length && h[0].distance < bd) { bd = h[0].distance; best = c; } }
+  return best;
+}
+let downAt = null, pressing = false, downChar = null;
+function setPtr(e) { ptr.x = (e.clientX / innerWidth) * 2 - 1; ptr.y = (e.clientY / innerHeight) * 2 - 1; ptr.last = clock.elapsedTime; if (selected) selected.auto.lastTouch = clock.elapsedTime; }
+const dom = renderer.domElement;
+dom.addEventListener('pointerdown', (e) => {
+  if (!e.isPrimary) { pressing = false; downAt = null; return; }
+  setPtr(e); downAt = { x: e.clientX, y: e.clientY, t: performance.now() }; pressing = true; downChar = pickChar(e);
+  if (!downChar && followBox.checked) { const p = floorPoint(e); if (p) walkTo(selected, p, true, false); }
+});
+dom.addEventListener('pointermove', (e) => {
+  if (!e.isPrimary) return; setPtr(e);
+  if (pressing && !downChar && followBox.checked) { const p = floorPoint(e); if (p) walkTo(selected, p, true, true); }
+});
+function release(e, cancelled) {
+  const w = downAt; pressing = false; downAt = null;
+  if (cancelled || !w) return;
+  if (Math.hypot(e.clientX - w.x, e.clientY - w.y) > 10 || performance.now() - w.t > 400) return;
+  if (downChar) { selected = downChar; flash('Mengendalikan: ' + selected.name, 2000); greet(selected); return; }
+  if (!followBox.checked) { const p = floorPoint(e); if (p) walkTo(selected, p, false, false); }
+}
+dom.addEventListener('pointerup', (e) => release(e, false));
+dom.addEventListener('pointercancel', (e) => release(e, true));
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+// ---------- Mulut ----------
+const VOW = ['あ', 'い', 'う', 'え', 'お'];
+function updateMouth(c, t, dt) {
+  const tgt = [0, 0, 0, 0, 0], sp = c.speech;
+  if (c.sl.yawn > 0.01) tgt[0] = c.sl.yawn;
+  else if (c.act.chew > 0.01) tgt[0] = c.act.chew;
+  else if (t < sp.until) {
+    if (t > sp.next) { sp.next = t + 0.07 + Math.random() * 0.09; sp.v = Math.floor(Math.random() * 5); sp.amp = Math.random() < 0.2 ? 0.1 : 0.45 + Math.random() * 0.5; }
+    tgt[sp.v || 0] = sp.amp || 0;
+  }
+  const k = 1 - Math.exp(-20 * dt);
+  for (let i = 0; i < 5; i++) { c.mouth[i] += (tgt[i] - c.mouth[i]) * k; const idx = c.morph[VOW[i]]; if (idx !== undefined) c.mesh.morphTargetInfluences[idx] = c.mouth[i]; }
+}
+
+// ---------- Simpan karakter di browser (IndexedDB): kunci "nama/namafile" ----------
+const DB_NAME = 'mmd-room', STORE = 'files';
+const dbOpen = () => new Promise((res, rej) => { const r = indexedDB.open(DB_NAME, 1); r.onupgradeneeded = () => r.result.createObjectStore(STORE); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+async function dbPut(key, blob) { const db = await dbOpen(); return new Promise((res, rej) => { const tx = db.transaction(STORE, 'readwrite'); tx.objectStore(STORE).put(blob, key); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
+async function dbAll() { const db = await dbOpen(); return new Promise((res, rej) => { const st = db.transaction(STORE).objectStore(STORE), k = st.getAllKeys(), v = st.getAll(); v.onsuccess = () => res({ keys: k.result, vals: v.result }); v.onerror = () => rej(v.error); }); }
+async function dbClear() { const db = await dbOpen(); return new Promise((res, rej) => { const tx = db.transaction(STORE, 'readwrite'); tx.objectStore(STORE).clear(); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
+
+let staged = new Map();
+$('files').addEventListener('change', (ev) => {
+  for (const f of ev.target.files) staged.set(f.name.toLowerCase(), f);
+  ev.target.value = '';
+  msg.textContent = staged.size + ' file terpilih' + ([...staged.keys()].some(k => k.endsWith('.pmx')) ? ' (pmx sudah ada)' : ' (pmx belum ada)') + '. Tambah dari folder lain, atau tekan "Tambah karakter".';
+});
+$('go').onclick = async () => {
+  const name = $('cname').value.trim() || 'Karakter';
+  if (![...staged.keys()].some(k => k.endsWith('.pmx'))) { msg.textContent = 'Pilih dulu file .pmx untuk ' + name + '.'; return; }
+  const files = staged; staged = new Map();
+  for (const [fn, blob] of files) dbPut(name + '/' + fn, blob).catch(() => {});
+  await addChar(name, files);
+};
+$('clear').onclick = async () => { await dbClear().catch(() => {}); [...chars].forEach(removeChar); msg.textContent = 'Semua karakter tersimpan dihapus.'; };
+$('tg').onclick = () => { const u = $('ui'); u.style.display = u.style.display === 'none' ? 'flex' : 'none'; };
+
+(async () => {   // saat dibuka: muat semua karakter tersimpan (file lama tanpa nama = Xavier)
+  try {
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
+    const { keys, vals } = await dbAll(), groups = {};
+    keys.forEach((k, i) => { const ks = String(k), j = ks.indexOf('/'); const n = j < 0 ? 'Xavier' : ks.slice(0, j), fn = j < 0 ? ks : ks.slice(j + 1); (groups[n] = groups[n] || new Map()).set(fn, vals[i]); });
+    for (const n in groups) if ([...groups[n].keys()].some(k => k.endsWith('.pmx'))) await addChar(n, groups[n]);
+  } catch (e) { console.warn('Tidak bisa membaca penyimpanan', e); }
+})();
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+
+let statT = 0;
+function tick() {
+  requestAnimationFrame(tick);
+  const dt = Math.min(clock.getDelta(), 0.1), t = clock.elapsedTime;
+  for (const c of chars) {
+    if (idleBox.checked) idle(c, t, dt);
+    lifeUpdate(c, t, dt); updateAuto(c, t, dt); updateWalk(c, dt); sleepyUpdate(c, t); sleepyApply(c); moodApply(c, t, dt); updateMouth(c, t, dt);
+  }
+  chatUpdate(t, dt);
+  shrink(foodMesh, Math.min(...chars.map(c => c.life.foodS), 1)); shrink(glassMesh, Math.min(...chars.map(c => c.life.waterS), 1));
+  helper.update(dt);
+  for (const c of chars) updateBubble(c, t);
+  if (t > statT) { statT = t + 1; $('stat').innerHTML = chars.map(c => `${c === selected ? '▶ ' : ''}${c.name}: lapar ${Math.round(c.needs.hunger)} · haus ${Math.round(c.needs.thirst)} · tenaga ${Math.round(c.needs.energy)} · ${c.life.state} · ${c.mood.type}`).join('<br>') + (chars.length > 1 ? '<br>❤ ' + chars[0].name + '–' + chars[1].name + ': ' + getRel(chars[0], chars[1]) : ''); }
+  camUpdate(dt); controls.update(); renderer.render(scene, camera);
+}
+tick();
+</script>
+</body>
+</html>
