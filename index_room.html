@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#20232b">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>Ruangan MMD</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #20232b; overflow: hidden; font-family: system-ui, sans-serif; }
+  canvas { display: block; }
+  #ui { position: fixed; left: 10px; top: calc(10px + env(safe-area-inset-top, 0px)); right: 10px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+        color: #fff; font-size: 13px; background: rgba(0,0,0,.45); padding: 8px 10px; border-radius: 10px; max-width: 460px; }
+  #ui input[type=range] { width: 120px; }
+  #tg { position: fixed; right: 10px; top: 10px; z-index: 5; opacity: .6; }
+  #msg { position: fixed; left: 0; right: 0; bottom: 12px; text-align: center; color: #cfd3dc; font-size: 13px; pointer-events: none; }
+  button { padding: 4px 10px; border-radius: 6px; border: 0; }
+</style>
+</head>
+<body>
+<button id="tg">☰</button>
+<div id="ui">
+  <label>1) Tambah file (pmx, lalu isi folder tex, lalu isi folder spa): <input id="files" type="file" multiple></label>
+  <button id="go">2) Muat model</button>
+  <label>Gerakan (.vmd): <input id="vmd" type="file" accept=".vmd"></label>
+  <label>Sudut lengan <input id="arm" type="range" min="-1.6" max="1.6" step="0.05" value="0.9"></label>
+  <label><input id="idle" type="checkbox" checked> Idle</label>
+  <button id="stop">Stop VMD</button>
+  <button id="clear">Hapus model tersimpan</button>
+  <button id="nod">Angguk 🙂</button>
+  <button id="greet">Sapa 👋</button>
+  <label><input id="auto" type="checkbox" checked> Jalan sendiri</label>
+  <label><input id="follow" type="checkbox" checked> Ikuti jari (matikan untuk putar kamera)</label>
+  <label><input id="legflip" type="checkbox"> Balik arah kaki</label>
+</div>
+<div id="msg">Langkah 1: pilih Xavier.pmx. Ulangi untuk isi folder tex dan spa. Langkah 2: Muat model.</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { MMDLoader } from 'three/addons/loaders/MMDLoader.js';
+import { MMDAnimationHelper } from 'three/addons/animation/MMDAnimationHelper.js';
+
+const msg = document.getElementById('msg');
+
+// Renderer, scene, camera
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x20232b);
+const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.1, 2000);
+camera.position.set(0, 14, 45);
+
+scene.add(new THREE.AmbientLight(0xffffff, 1.6));
+const dir = new THREE.DirectionalLight(0xffffff, 1.2);
+dir.position.set(-1, 2, 2);
+scene.add(dir);
+const grid = new THREE.GridHelper(40, 20, 0x555a66, 0x333845);
+scene.add(grid);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 10, 0);
+controls.update();
+
+// Texture path fix: model expects tex\*.png and spa\*.bmp,
+// but files are in one folder and some are .jpg. Flatten + remap.
+const fileMap = {};   // nama file (huruf kecil) -> blob URL
+const manager = new THREE.LoadingManager();
+manager.setURLModifier((url) => {
+  if (url.startsWith('data:')) return url;
+  let name = decodeURIComponent(url.split(/[\\/]/).pop()).toLowerCase();
+  if (fileMap[name]) return fileMap[name];
+  const alt = name.replace(/\.bmp$/, '.jpg');
+  if (fileMap[alt]) return fileMap[alt];
+  return url;
+});
+
+const loader = new MMDLoader(manager);
+const helper = new MMDAnimationHelper({ afterglow: 2.0 });
+const clock = new THREE.Clock();
+
+let mesh = null, bones = {}, morph = {}, vmdActive = false;
+
+function loadModel(pmxUrl) {
+loader.load(pmxUrl, (m) => {
+  mesh = m;
+  scene.add(mesh);
+  helper.add(mesh, { physics: false });   // pasang helper tanpa animasi dulu
+  const find = (n) => mesh.skeleton.getBoneByName(n);
+  bones = {
+    head: find('頭'), neck: find('首'), upper: find('上半身'),
+    lArm: find('左腕'), rArm: find('右腕'),
+    lLeg: find('左足'), rLeg: find('右足'), lKnee: find('左ひざ'), rKnee: find('右ひざ'),
+    lAnk: find('左足首'), rAnk: find('右足首'),
+  };
+  morph = mesh.morphTargetDictionary || {};
+  // sesuaikan kamera dengan tinggi model
+  const box = new THREE.Box3().setFromObject(mesh);
+  const h = box.max.y - box.min.y;
+  mesh.position.set(0, 0, 0);
+  mesh.rotation.y = 0;
+  // tinggi pergelangan kaki saat berdiri = acuan "menapak lantai"
+  mesh.updateMatrixWorld(true);
+  walk.ground = null;
+  if (bones.lAnk && bones.rAnk) {
+    const v = new THREE.Vector3();
+    walk.ground = Math.min(bones.lAnk.getWorldPosition(v).y, bones.rAnk.getWorldPosition(v).y);
+  }
+  buildRoom(h);
+  msg.textContent = 'Dia jalan sendiri. Sentuh lantai: dia datang ke jarimu. Ketuk dia untuk menyapa. ☰ = panel.';
+  document.getElementById('ui').style.display = 'none';
+  setTimeout(() => { msg.textContent = ''; }, 6000);
+}, (e) => {
+  if (e.lengthComputable) msg.textContent = 'Memuat… ' + Math.round(e.loaded / e.total * 100) + '%';
+}, (err) => {
+  console.error(err);
+  msg.textContent = 'Gagal memuat model: ' + (err && err.message ? err.message : err);
+});
+}
+
+let pmxUrl = null, nFiles = 0;
+document.getElementById('files').addEventListener('change', (ev) => {
+  for (const f of ev.target.files) {
+    const u = URL.createObjectURL(f);
+    fileMap[f.name.toLowerCase()] = u;
+    dbPut(f.name.toLowerCase(), f).catch(() => {});   // simpan di browser ini saja
+    if (/\.pmx$/i.test(f.name)) pmxUrl = u + '#.pmx';   // MMDLoader butuh ekstensi di URL
+    nFiles++;
+  }
+  ev.target.value = '';   // supaya bisa pilih lagi dari folder lain
+  msg.textContent = nFiles + ' file terpilih' + (pmxUrl ? ' (pmx sudah ada)' : ' (pmx belum ada)') +
+    '. Tambah dari folder lain, atau tekan "Muat model".';
+});
+
+document.getElementById('go').onclick = () => {
+  if (!pmxUrl) { msg.textContent = 'Pilih dulu Xavier.pmx.'; return; }
+  if (mesh) { scene.remove(mesh); helper.remove(mesh); mesh = null; }
+  msg.textContent = 'Memuat model…';
+  loadModel(pmxUrl);
+};
+
+// Load VMD dari file picker
+document.getElementById('vmd').addEventListener('change', (ev) => {
+  const f = ev.target.files[0];
+  if (!f || !mesh) return;
+  const url = URL.createObjectURL(f) + '#.vmd';
+  msg.textContent = 'Memuat gerakan…';
+  loader.loadAnimation(url, mesh, (clip) => {
+    helper.remove(mesh);
+    helper.add(mesh, { animation: clip, physics: false });
+    vmdActive = true;
+    document.getElementById('idle').checked = false;
+    msg.textContent = 'Gerakan berjalan.';
+  }, undefined, (e) => { console.error(e); msg.textContent = 'Gagal memuat VMD.'; });
+});
+
+document.getElementById('stop').onclick = () => {
+  if (!mesh) return;
+  helper.remove(mesh);
+  mesh.skeleton.pose();
+  helper.add(mesh, { physics: false });
+  vmdActive = false;
+  document.getElementById('idle').checked = true;
+};
+
+// Animasi idle sederhana (napas, goyang kepala, kedip)
+const armSlider = document.getElementById('arm');
+const idleBox = document.getElementById('idle');
+let blinkT = 0;
+
+// Angguk: ubah ke -1 kalau kepala malah mendongak
+const NOD_DIR = 1;
+let nodStart = -1;               // waktu mulai angguk (detik)
+const NOD_TIMES = 2;             // berapa kali mengangguk
+const NOD_SPEED = 2.2;           // detik per angguk
+document.getElementById('nod').onclick = () => {
+  if (vmdActive) return;
+  document.getElementById('idle').checked = true;
+  nodStart = clock.elapsedTime;
+};
+
+function nodAmount(t) {
+  if (nodStart < 0) return 0;
+  const p = (t - nodStart) / NOD_SPEED;      // progres dalam satuan angguk
+  if (p >= NOD_TIMES) { nodStart = -1; return 0; }
+  // 0 -> 1 -> 0 halus per angguk
+  return Math.pow(Math.sin(Math.PI * (p % 1)), 2);
+}
+
+// ---------- Interaktif: kepala ikut jari, ketuk model = menyapa ----------
+const followBox = document.getElementById('follow');
+const LOOK_X_DIR = 1;   // balik ke -1 kalau kepala menoleh ke arah yang berlawanan
+const LOOK_Y_DIR = 1;   // balik ke -1 kalau naik-turunnya terbalik
+let ptr = { x: 0, y: 0, last: -99 };       // posisi sentuhan (-1..1) dan waktu terakhir
+let look = { x: 0, y: 0 };                 // arah pandang yang dihaluskan
+let wander = { x: 0, y: 0, next: 0 };      // arah acak saat tidak disentuh
+
+function setControls() { controls.enableRotate = !followBox.checked; controls.enablePan = !followBox.checked; }
+followBox.addEventListener('change', setControls);
+setControls();
+
+const ray = new THREE.Raycaster();
+const ndc = (e) => new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+function floorPoint(e) {
+  if (!floorMesh) return null;
+  ray.setFromCamera(ndc(e), camera);
+  const h = ray.intersectObject(floorMesh);
+  return h.length ? h[0].point : null;
+}
+function onModel(e) {
+  if (!mesh) return false;
+  ray.setFromCamera(ndc(e), camera);
+  return ray.intersectObject(mesh, true).length > 0;
+}
+const autoBox = document.getElementById('auto');
+const auto = { wait: 2, lastTouch: -99 };
+let downAt = null, pressing = false, downOnModel = false;
+
+function setPtr(e) {
+  ptr.x = (e.clientX / innerWidth) * 2 - 1;
+  ptr.y = (e.clientY / innerHeight) * 2 - 1;
+  ptr.last = clock.elapsedTime;
+  auto.lastTouch = clock.elapsedTime;
+}
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  setPtr(e);
+  downAt = { x: e.clientX, y: e.clientY, t: performance.now() };
+  pressing = true;
+  downOnModel = onModel(e);
+  // sentuh lantai -> dia berjalan ke jari
+  if (!downOnModel && followBox.checked && !vmdActive) { const p = floorPoint(e); if (p) walkTo(p, true, false); }
+});
+renderer.domElement.addEventListener('pointermove', (e) => {
+  setPtr(e);
+  // geser jari -> dia terus mengikuti
+  if (pressing && !downOnModel && followBox.checked && !vmdActive) { const p = floorPoint(e); if (p) walkTo(p, true, true); }
+});
+function release(e, cancelled) {
+  const wasDown = downAt; pressing = false; downAt = null;
+  if (cancelled || !wasDown || !mesh) return;
+  const moved = Math.hypot(e.clientX - wasDown.x, e.clientY - wasDown.y);
+  const quick = performance.now() - wasDown.t < 400;
+  if (moved > 10 || !quick) return;
+  if (downOnModel) { greet(); return; }
+  if (!followBox.checked && !vmdActive) { const p = floorPoint(e); if (p) walkTo(p, false, false); }
+}
+renderer.domElement.addEventListener('pointerup', (e) => release(e, false));
+renderer.domElement.addEventListener('pointercancel', (e) => release(e, true));
+
+// Sapaan = angguk + lambaikan tangan kanan
+const WAVE_DUR = 2.6;
+let waveStart = -1;
+function greet() {
+  if (vmdActive) return;
+  idleBox.checked = true;
+  nodStart = clock.elapsedTime;
+  waveStart = clock.elapsedTime;
+}
+document.getElementById('greet').onclick = greet;
+
+function waveAmount(t) {
+  if (waveStart < 0) return 0;
+  const p = (t - waveStart) / WAVE_DUR;
+  if (p >= 1) { waveStart = -1; return 0; }
+  return Math.min(1, Math.sin(Math.PI * p) * 2.2);   // naik cepat, turun pelan
+}
+
+function idle(t, dt) {
+  const { head, neck, upper, lArm, rArm } = bones;
+  const nod = nodAmount(t) * NOD_DIR;
+
+  // arah pandang: ikut jari kalau baru disentuh, kalau tidak melirik acak pelan
+  let tx = 0, ty = 0;
+  if (followBox.checked && t - ptr.last < 4) { tx = ptr.x; ty = ptr.y * 0.6; }
+  else {
+    if (t > wander.next) { wander.x = (Math.random() - 0.5) * 0.9; wander.y = (Math.random() - 0.5) * 0.4; wander.next = t + 2 + Math.random() * 4; }
+    tx = wander.x; ty = wander.y;
+  }
+  const k = 1 - Math.exp(-6 * dt);
+  look.x += (tx - look.x) * k;
+  look.y += (ty - look.y) * k;
+  const lx = look.x * LOOK_X_DIR, ly = look.y * LOOK_Y_DIR;
+
+  if (upper) upper.rotation.x = Math.sin(t * 1.6) * 0.02 + nod * 0.08;
+  if (neck) { neck.rotation.y = lx * 0.25; neck.rotation.x = ly * 0.1 + nod * 0.15; }
+  if (head) { head.rotation.y = lx * 0.45; head.rotation.x = ly * 0.25 + Math.sin(t * 0.9) * 0.02 + nod * 0.3; }
+
+  const a = parseFloat(armSlider.value);
+  const w = waveAmount(t);
+  if (lArm) lArm.rotation.z = a;
+  if (rArm) rArm.rotation.z = -a + w * (a + 0.9) + Math.sin(t * 11) * 0.12 * w;
+
+  const bi = morph['まばたき'];
+  if (bi !== undefined) {
+    blinkT = (t % 4);
+    mesh.morphTargetInfluences[bi] = blinkT > 3.8 ? 1 : 0;
+  }
+}
+
+// ---------- Ruangan ----------
+let room = null, floorMesh = null, shadowMesh = null, marker = null, H = 18, HALF = 54;
+const obstacles = [];   // kotak penghalang {x0,x1,z0,z1}
+
+function woodTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const g = c.getContext('2d');
+  for (let i = 0; i < 4; i++) {
+    g.fillStyle = ['#c9a679', '#bf9a6c', '#d2b087', '#c4a074'][i];
+    g.fillRect(0, i * 64, 256, 64);
+    g.fillStyle = 'rgba(80,50,20,.35)'; g.fillRect(0, i * 64, 256, 2);
+    g.fillRect(((i * 97) % 200) + 20, i * 64, 2, 64);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+function blobTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d');
+  const gr = g.createRadialGradient(64, 64, 4, 64, 64, 62);
+  gr.addColorStop(0, 'rgba(0,0,0,.5)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+  return new THREE.CanvasTexture(c);
+}
+function addBox(parent, w, h, d, color, x, y, z, solid) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshLambertMaterial({ color }));
+  m.position.set(x, y + h / 2, z);
+  parent.add(m);
+  if (solid) obstacles.push({ x0: x - w / 2, x1: x + w / 2, z0: z - d / 2, z1: z + d / 2 });
+  return m;
+}
+
+function buildRoom(h) {
+  if (room) scene.remove(room);
+  if (shadowMesh) scene.remove(shadowMesh);
+  if (marker) scene.remove(marker);
+  grid.visible = false;
+  obstacles.length = 0;
+  H = h; HALF = h * 3;
+  const S = HALF, WH = h * 2.7;
+  room = new THREE.Group();
+
+  // lantai
+  const tex = woodTexture(); tex.repeat.set(6, 6);
+  floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(S * 2, S * 2), new THREE.MeshLambertMaterial({ map: tex }));
+  floorMesh.rotation.x = -Math.PI / 2;
+  room.add(floorMesh);
+
+  // dinding (hanya terlihat dari dalam)
+  const wallMat = new THREE.MeshLambertMaterial({ color: 0xefe4d6 });
+  const back = new THREE.Mesh(new THREE.PlaneGeometry(S * 2, WH), wallMat);
+  back.position.set(0, WH / 2, -S);
+  const left = new THREE.Mesh(new THREE.PlaneGeometry(S * 2, WH), wallMat);
+  left.position.set(-S, WH / 2, 0); left.rotation.y = Math.PI / 2;
+  const right = new THREE.Mesh(new THREE.PlaneGeometry(S * 2, WH), wallMat);
+  right.position.set(S, WH / 2, 0); right.rotation.y = -Math.PI / 2;
+  room.add(back, left, right);
+  addBox(room, S * 2, h * 0.12, 0.3, 0xc9b79f, 0, 0, -S + 0.15, false);   // list bawah
+
+  // jendela di dinding belakang
+  addBox(room, h * 1.7, h * 1.2, 0.4, 0x8b6b4a, h * 1.5, h * 1.0, -S + 0.2, false);
+  const glass = new THREE.Mesh(new THREE.PlaneGeometry(h * 1.5, h * 1.0), new THREE.MeshBasicMaterial({ color: 0xbfe4ff }));
+  glass.position.set(h * 1.5, h * 1.1 + h * 0.5, -S + 0.45);
+  room.add(glass);
+
+  // karpet
+  const rug = new THREE.Mesh(new THREE.CircleGeometry(h * 1.3, 40), new THREE.MeshLambertMaterial({ color: 0xf0b8c4 }));
+  rug.rotation.x = -Math.PI / 2; rug.position.set(0, 0.05, h * 0.4);
+  room.add(rug);
+
+  // kasur (pojok kiri belakang)
+  const bx = -S + h * 1.0, bz = -S + h * 1.45;
+  addBox(room, h * 1.9, h * 0.35, h * 2.8, 0x8b5e3c, bx, 0, bz, true);
+  addBox(room, h * 1.8, h * 0.2, h * 2.7, 0xf4f1ec, bx, h * 0.35, bz, false);
+  addBox(room, h * 1.5, h * 0.12, h * 0.5, 0xffffff, bx, h * 0.55, bz - h * 1.0, false);
+  addBox(room, h * 1.8, h * 0.08, h * 1.3, 0x8fb3d9, bx, h * 0.55, bz + h * 0.5, false);
+
+  // rak buku (dinding belakang, tengah)
+  addBox(room, h * 1.5, h * 1.9, h * 0.45, 0x7a5233, -h * 0.2, 0, -S + h * 0.3, true);
+  [0.35, 0.8, 1.25, 1.6].forEach((yy, i) => addBox(room, h * 1.3, h * 0.28, h * 0.1, [0xd26a6a, 0x6a9bd2, 0x7dc47d, 0xd9c04a][i], -h * 0.2, h * yy, -S + h * 0.55, false));
+
+  // meja (dinding kanan)
+  addBox(room, h * 1.0, h * 0.85, h * 2.0, 0xa77b52, S - h * 0.6, 0, -h * 0.3, true);
+  addBox(room, h * 0.5, h * 0.55, h * 0.5, 0xdddddd, S - h * 0.55, h * 0.85, -h * 0.3, false);   // laptop/monitor kecil
+
+  // lampu berdiri (kanan depan)
+  const lx = S - h * 0.5, lz = h * 1.8;
+  addBox(room, h * 0.12, h * 1.6, h * 0.12, 0x555555, lx, 0, lz, true);
+  const shade = new THREE.Mesh(new THREE.SphereGeometry(h * 0.3, 16, 12), new THREE.MeshBasicMaterial({ color: 0xffe2a8 }));
+  shade.position.set(lx, h * 1.75, lz); room.add(shade);
+  const pl = new THREE.PointLight(0xffd9a8, h * h * 3, 0, 2);
+  pl.position.set(lx - h * 0.3, h * 1.7, lz); room.add(pl);
+
+  // tanaman (kiri depan)
+  addBox(room, h * 0.35, h * 0.4, h * 0.35, 0xc57f5a, -S + h * 0.5, 0, h * 1.8, true);
+  const leaf = new THREE.Mesh(new THREE.SphereGeometry(h * 0.35, 14, 10), new THREE.MeshLambertMaterial({ color: 0x5fae6a }));
+  leaf.position.set(-S + h * 0.5, h * 0.75, h * 1.8); room.add(leaf);
+
+  scene.add(room);
+
+  // bayangan bulat di bawah karakter & penanda tujuan
+  shadowMesh = new THREE.Mesh(new THREE.CircleGeometry(h * 0.5, 24),
+    new THREE.MeshBasicMaterial({ map: blobTexture(), transparent: true, depthWrite: false }));
+  shadowMesh.rotation.x = -Math.PI / 2; shadowMesh.position.y = 0.12;
+  scene.add(shadowMesh);
+  marker = new THREE.Mesh(new THREE.RingGeometry(h * 0.18, h * 0.24, 28),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8, depthWrite: false }));
+  marker.rotation.x = -Math.PI / 2; marker.position.y = 0.15; marker.visible = false;
+  scene.add(marker);
+
+  // kamera
+  controls.target.set(0, h * 0.55, 0);
+  camera.position.set(0, h * 1.9, h * 4.6);
+  controls.minDistance = h * 0.8; controls.maxDistance = h * 7;
+  controls.maxPolarAngle = Math.PI / 2 - 0.03;
+  controls.update();
+}
+
+// ---------- Berjalan ----------
+const walk = { active: false, tx: 0, tz: 0, phase: 0, blend: 0, fast: false, ground: null };
+const legFlip = document.getElementById('legflip');
+const PAD = 0.3;   // jarak aman dari perabot (kali tinggi model)
+
+function blocked(x, z) {
+  const p = H * PAD;
+  if (Math.abs(x) > HALF - H * 0.4 || Math.abs(z) > HALF - H * 0.4) return true;
+  return obstacles.some(o => x > o.x0 - p && x < o.x1 + p && z > o.z0 - p && z < o.z1 + p);
+}
+function walkTo(pt, fast = false, silent = false) {
+  if (!mesh || vmdActive) return;
+  if (blocked(pt.x, pt.z)) {
+    if (!silent) msg.textContent = 'Di situ ada perabot atau dinding, coba bagian lantai lain.';
+    return;
+  }
+  walk.active = true; walk.fast = fast; walk.tx = pt.x; walk.tz = pt.z;
+  marker.position.set(pt.x, 0.15, pt.z); marker.visible = !silent || fast;
+}
+
+function pickRandomSpot() {
+  if (!mesh) return;
+  for (let i = 0; i < 14; i++) {
+    const x = (Math.random() * 2 - 1) * (HALF - H * 0.6), z = (Math.random() * 2 - 1) * (HALF - H * 0.6);
+    if (blocked(x, z)) continue;
+    if (Math.hypot(x - mesh.position.x, z - mesh.position.z) < H * 0.8) continue;
+    walkTo({ x, z }, false, true);
+    marker.visible = false;
+    return;
+  }
+}
+
+// Jalan-jalan sendiri: diam sebentar, lalu ke tempat acak, kadang menyapa
+function updateAuto(t, dt) {
+  if (!autoBox.checked || vmdActive || walk.active) { auto.wait = 1.5 + Math.random() * 4; return; }
+  if (t - auto.lastTouch < 5) return;            // baru disentuh -> tunggu dulu
+  auto.wait -= dt;
+  if (auto.wait > 0) return;
+  auto.wait = 1.5 + Math.random() * 4;
+  const r = Math.random();
+  if (r < 0.12) greet();
+  else if (r < 0.2) nodStart = t;
+  else pickRandomSpot();
+}
+
+function updateWalk(dt) {
+  if (!mesh) return;
+  const p = mesh.position;
+  if (walk.active) {
+    const dx = walk.tx - p.x, dz = walk.tz - p.z, dist = Math.hypot(dx, dz);
+    if (dist < H * 0.08) { walk.active = false; walk.fast = false; marker.visible = false; }
+    else {
+      // putar badan ke arah tujuan
+      const want = Math.atan2(dx, dz);
+      let diff = want - mesh.rotation.y;
+      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+      mesh.rotation.y += diff * (1 - Math.exp(-9 * dt));
+      // maju kalau sudah menghadap kira-kira ke tujuan
+      if (Math.abs(diff) < 0.9) {
+        const step = Math.min(dist, H * (walk.fast ? 1.3 : 0.8) * dt);
+        let nx = p.x + dx / dist * step, nz = p.z + dz / dist * step;
+        if (blocked(nx, nz)) {
+          if (!blocked(nx, p.z)) nz = p.z;
+          else if (!blocked(p.x, nz)) nx = p.x;
+          else { nx = p.x; nz = p.z; walk.active = false; marker.visible = false; }
+        }
+        const moved = Math.hypot(nx - p.x, nz - p.z);
+        p.x = nx; p.z = nz;
+        walk.phase += moved * (Math.PI * 2 / (H * 0.6));
+      }
+    }
+  }
+  walk.blend += ((walk.active ? 1 : 0) - walk.blend) * (1 - Math.exp(-10 * dt));
+  if (walk.blend < 0.001 && !walk.active) walk.blend = 0;
+
+  // ayunan kaki & tangan (kiri-kanan bergantian)
+  const { lLeg, rLeg, lKnee, rKnee, lAnk, rAnk, upper, lArm, rArm } = bones;
+  const LEG = legFlip.checked ? -1 : 1, b = walk.blend;
+  const leg = (hip, knee, ank, ph) => {
+    const h = LEG * Math.sin(ph) * 0.6 * b;
+    const k = -LEG * Math.max(0, Math.cos(ph)) * 0.8 * b;
+    if (hip) hip.rotation.x = h;
+    if (knee) knee.rotation.x = k;
+    if (ank) ank.rotation.x = -(h + k) * 0.7;      // telapak tetap rata
+  };
+  leg(lLeg, lKnee, lAnk, walk.phase);
+  leg(rLeg, rKnee, rAnk, walk.phase + Math.PI);
+  const swing = LEG * Math.sin(walk.phase) * 0.55 * b;
+  if (lArm) lArm.rotation.x = -swing;              // tangan berlawanan dengan kaki di sisi yang sama
+  if (rArm) rArm.rotation.x = swing;
+  if (upper) { upper.rotation.z = Math.sin(walk.phase) * 0.04 * b; upper.rotation.y = -Math.sin(walk.phase) * 0.1 * b; }
+
+  // menapak lantai: turunkan/naikkan badan supaya kaki terendah selalu menyentuh lantai
+  p.y = 0;
+  if (walk.ground !== null && lAnk && rAnk && b > 0.001) {
+    mesh.updateMatrixWorld(true);
+    const v = new THREE.Vector3();
+    const low = Math.min(lAnk.getWorldPosition(v).y, rAnk.getWorldPosition(v).y);
+    p.y = Math.max(-H * 0.25, Math.min(H * 0.25, walk.ground - low));
+  }
+
+  if (shadowMesh) shadowMesh.position.set(p.x, 0.12, p.z);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ---------- Simpan model di browser (IndexedDB) ----------
+const DB_NAME = 'mmd-room', STORE = 'files';
+function dbOpen() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open(DB_NAME, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore(STORE);
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function dbPut(name, blob) {
+  const db = await dbOpen();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).put(blob, name);
+    tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+  });
+}
+async function dbAll() {
+  const db = await dbOpen();
+  return new Promise((res, rej) => {
+    const st = db.transaction(STORE).objectStore(STORE);
+    const k = st.getAllKeys(), v = st.getAll();
+    v.onsuccess = () => res({ keys: k.result, vals: v.result });
+    v.onerror = () => rej(v.error);
+  });
+}
+async function dbClear() {
+  const db = await dbOpen();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).clear();
+    tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+  });
+}
+
+const ui = document.getElementById('ui');
+document.getElementById('tg').onclick = () => { ui.style.display = ui.style.display === 'none' ? 'flex' : 'none'; };
+document.getElementById('clear').onclick = async () => {
+  await dbClear().catch(() => {});
+  msg.textContent = 'Model tersimpan dihapus. Muat ulang halaman untuk memilih file baru.';
+};
+
+// Saat dibuka: kalau ada model tersimpan, langsung dimuat
+(async () => {
+  try {
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
+    const { keys, vals } = await dbAll();
+    if (!keys.some(k => String(k).endsWith('.pmx'))) return;
+    keys.forEach((k, i) => {
+      const u = URL.createObjectURL(vals[i]);
+      fileMap[k] = u; nFiles++;
+      if (String(k).endsWith('.pmx')) pmxUrl = u + '#.pmx';
+    });
+    msg.textContent = 'Memuat model tersimpan…';
+    loadModel(pmxUrl);
+  } catch (e) { console.warn('Tidak bisa membaca penyimpanan', e); }
+})();
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+
+function tick() {
+  requestAnimationFrame(tick);
+  const dt = clock.getDelta();
+  if (mesh) {
+    if (!vmdActive && idleBox.checked) idle(clock.elapsedTime, dt);
+    if (!vmdActive) { updateAuto(clock.elapsedTime, dt); updateWalk(dt); } else { walk.active = false; if (marker) marker.visible = false; }
+    helper.update(dt);
+  }
+  controls.update();
+  renderer.render(scene, camera);
+}
+tick();
+</script>
+</body>
+</html>
