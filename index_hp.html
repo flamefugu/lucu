@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MMD Viewer - Xavier</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #20232b; overflow: hidden; font-family: system-ui, sans-serif; }
+  canvas { display: block; }
+  #ui { position: fixed; left: 10px; top: 10px; right: 10px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+        color: #fff; font-size: 13px; background: rgba(0,0,0,.45); padding: 8px 10px; border-radius: 10px; max-width: 460px; }
+  #ui input[type=range] { width: 120px; }
+  #msg { position: fixed; left: 0; right: 0; bottom: 12px; text-align: center; color: #cfd3dc; font-size: 13px; pointer-events: none; }
+  button { padding: 4px 10px; border-radius: 6px; border: 0; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <label>1) Tambah file (pmx, lalu isi folder tex, lalu isi folder spa): <input id="files" type="file" multiple></label>
+  <button id="go">2) Muat model</button>
+  <label>Gerakan (.vmd): <input id="vmd" type="file" accept=".vmd"></label>
+  <label>Sudut lengan <input id="arm" type="range" min="-1.6" max="1.6" step="0.05" value="0.9"></label>
+  <label><input id="idle" type="checkbox" checked> Idle</label>
+  <button id="stop">Stop VMD</button>
+  <button id="nod">Angguk 🙂</button>
+</div>
+<div id="msg">Langkah 1: pilih Xavier.pmx. Ulangi untuk isi folder tex dan spa. Langkah 2: Muat model.</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { MMDLoader } from 'three/addons/loaders/MMDLoader.js';
+import { MMDAnimationHelper } from 'three/addons/animation/MMDAnimationHelper.js';
+
+const msg = document.getElementById('msg');
+
+// Renderer, scene, camera
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x20232b);
+const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.1, 2000);
+camera.position.set(0, 14, 45);
+
+scene.add(new THREE.AmbientLight(0xffffff, 1.6));
+const dir = new THREE.DirectionalLight(0xffffff, 1.2);
+dir.position.set(-1, 2, 2);
+scene.add(dir);
+scene.add(new THREE.GridHelper(40, 20, 0x555a66, 0x333845));
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 10, 0);
+controls.update();
+
+// Texture path fix: model expects tex\*.png and spa\*.bmp,
+// but files are in one folder and some are .jpg. Flatten + remap.
+const fileMap = {};   // nama file (huruf kecil) -> blob URL
+const manager = new THREE.LoadingManager();
+manager.setURLModifier((url) => {
+  if (url.startsWith('data:')) return url;
+  let name = decodeURIComponent(url.split(/[\\/]/).pop()).toLowerCase();
+  if (fileMap[name]) return fileMap[name];
+  const alt = name.replace(/\.bmp$/, '.jpg');
+  if (fileMap[alt]) return fileMap[alt];
+  return url;
+});
+
+const loader = new MMDLoader(manager);
+const helper = new MMDAnimationHelper({ afterglow: 2.0 });
+const clock = new THREE.Clock();
+
+let mesh = null, bones = {}, morph = {}, vmdActive = false;
+
+function loadModel(pmxUrl) {
+loader.load(pmxUrl, (m) => {
+  mesh = m;
+  scene.add(mesh);
+  helper.add(mesh, { physics: false });   // pasang helper tanpa animasi dulu
+  const find = (n) => mesh.skeleton.getBoneByName(n);
+  bones = {
+    head: find('頭'), neck: find('首'), upper: find('上半身'),
+    lArm: find('左腕'), rArm: find('右腕'),
+  };
+  morph = mesh.morphTargetDictionary || {};
+  // sesuaikan kamera dengan tinggi model
+  const box = new THREE.Box3().setFromObject(mesh);
+  const h = box.max.y - box.min.y;
+  controls.target.set(0, h * 0.55, 0);
+  camera.position.set(0, h * 0.6, h * 2.4);
+  controls.update();
+  msg.textContent = 'Seret = putar, scroll = zoom. Pilih file .vmd untuk gerakan.';
+}, (e) => {
+  if (e.lengthComputable) msg.textContent = 'Memuat… ' + Math.round(e.loaded / e.total * 100) + '%';
+}, (err) => {
+  console.error(err);
+  msg.textContent = 'Gagal memuat model. Cek folder model/ dan jalankan lewat server lokal.';
+});
+}
+
+let pmxUrl = null, nFiles = 0;
+document.getElementById('files').addEventListener('change', (ev) => {
+  for (const f of ev.target.files) {
+    const u = URL.createObjectURL(f);
+    fileMap[f.name.toLowerCase()] = u;
+    if (/\.pmx$/i.test(f.name)) pmxUrl = u;
+    nFiles++;
+  }
+  ev.target.value = '';   // supaya bisa pilih lagi dari folder lain
+  msg.textContent = nFiles + ' file terpilih' + (pmxUrl ? ' (pmx sudah ada)' : ' (pmx belum ada)') +
+    '. Tambah dari folder lain, atau tekan "Muat model".';
+});
+
+document.getElementById('go').onclick = () => {
+  if (!pmxUrl) { msg.textContent = 'Pilih dulu Xavier.pmx.'; return; }
+  if (mesh) { scene.remove(mesh); helper.remove(mesh); mesh = null; }
+  msg.textContent = 'Memuat model…';
+  loadModel(pmxUrl);
+};
+
+// Load VMD dari file picker
+document.getElementById('vmd').addEventListener('change', (ev) => {
+  const f = ev.target.files[0];
+  if (!f || !mesh) return;
+  const url = URL.createObjectURL(f);
+  msg.textContent = 'Memuat gerakan…';
+  loader.loadAnimation(url, mesh, (clip) => {
+    helper.remove(mesh);
+    helper.add(mesh, { animation: clip, physics: false });
+    vmdActive = true;
+    document.getElementById('idle').checked = false;
+    msg.textContent = 'Gerakan berjalan.';
+  }, undefined, (e) => { console.error(e); msg.textContent = 'Gagal memuat VMD.'; });
+});
+
+document.getElementById('stop').onclick = () => {
+  if (!mesh) return;
+  helper.remove(mesh);
+  mesh.skeleton.pose();
+  helper.add(mesh, { physics: false });
+  vmdActive = false;
+  document.getElementById('idle').checked = true;
+};
+
+// Animasi idle sederhana (napas, goyang kepala, kedip)
+const armSlider = document.getElementById('arm');
+const idleBox = document.getElementById('idle');
+let blinkT = 0;
+
+// Angguk: ubah ke -1 kalau kepala malah mendongak
+const NOD_DIR = 1;
+let nodStart = -1;               // waktu mulai angguk (detik)
+const NOD_TIMES = 2;             // berapa kali mengangguk
+const NOD_SPEED = 2.2;           // detik per angguk
+document.getElementById('nod').onclick = () => {
+  if (vmdActive) return;
+  document.getElementById('idle').checked = true;
+  nodStart = clock.elapsedTime;
+};
+
+function nodAmount(t) {
+  if (nodStart < 0) return 0;
+  const p = (t - nodStart) / NOD_SPEED;      // progres dalam satuan angguk
+  if (p >= NOD_TIMES) { nodStart = -1; return 0; }
+  // 0 -> 1 -> 0 halus per angguk
+  return Math.pow(Math.sin(Math.PI * (p % 1)), 2);
+}
+
+function idle(t) {
+  const { head, neck, upper, lArm, rArm } = bones;
+  const nod = nodAmount(t) * NOD_DIR;
+  if (upper) upper.rotation.x = Math.sin(t * 1.6) * 0.02 + nod * 0.08;
+  if (neck) { neck.rotation.y = Math.sin(t * 0.7) * 0.08; neck.rotation.x = nod * 0.15; }
+  if (head) { head.rotation.y = Math.sin(t * 0.5) * 0.1; head.rotation.x = Math.sin(t * 0.9) * 0.03 + nod * 0.3; }
+  const a = parseFloat(armSlider.value);
+  if (lArm) lArm.rotation.z = a;
+  if (rArm) rArm.rotation.z = -a;
+  const bi = morph['まばたき'];
+  if (bi !== undefined) {
+    blinkT = (t % 4);
+    mesh.morphTargetInfluences[bi] = blinkT > 3.8 ? 1 : 0;
+  }
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function tick() {
+  requestAnimationFrame(tick);
+  const dt = clock.getDelta();
+  if (mesh) {
+    if (!vmdActive && idleBox.checked) idle(clock.elapsedTime);
+    helper.update(dt);
+  }
+  controls.update();
+  renderer.render(scene, camera);
+}
+tick();
+</script>
+</body>
+</html>
