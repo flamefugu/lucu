@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MMD Viewer - Xavier</title>
+<style>
+:root{--bg:#20232b;--panel:rgba(24,27,36,.9);--line:rgba(255,255,255,.12);--fg:#eef0f5;--mut:#a9afbd;--acc:#7aa2ff;--st:env(safe-area-inset-top,0px);--sb:env(safe-area-inset-bottom,0px)}
+html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:var(--fg)}
+canvas{display:block}
+button{font:inherit;color:inherit;cursor:pointer;-webkit-tap-highlight-color:transparent}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.btn{min-height:40px;padding:0 12px;border-radius:10px;border:1px solid var(--line);background:rgba(255,255,255,.08);font-size:14px}
+.btn:active{background:rgba(255,255,255,.2)}
+.btn.pri{background:var(--acc);border-color:transparent;color:#10131a;font-weight:600}
+.btn.dng{color:#ff9a9a}
+.ib{width:40px;height:40px;padding:0;border-radius:12px;border:1px solid var(--line);background:var(--panel);font-size:18px;backdrop-filter:blur(8px)}
+#top{position:fixed;right:10px;top:calc(10px + var(--st));z-index:30;display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+#top .trow{display:flex;gap:8px}
+#ui{position:fixed;left:10px;top:calc(10px + var(--st));width:min(380px,calc(100vw - 72px));max-height:calc(100dvh - 20px - var(--st) - var(--sb));overflow-y:auto;overscroll-behavior:contain;box-sizing:border-box;z-index:25;display:none;padding:2px 14px 12px;font-size:14px;background:var(--panel);border:1px solid var(--line);border-radius:16px;backdrop-filter:blur(8px)}
+#ui.open{display:block}
+.sec{padding:12px 0;border-top:1px solid var(--line)}
+.sec:first-child{border-top:0}
+.sec h3{margin:0 0 8px;font-size:13px;font-weight:600;color:var(--mut)}
+.stack{display:grid;gap:8px}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.hint{margin:6px 0 0;font-size:12px;line-height:1.4;color:var(--mut)}
+.fld{display:grid;gap:4px;font-size:13px;color:var(--mut)}
+.fld input[type=text]{height:40px;padding:0 12px;box-sizing:border-box;border-radius:10px;border:1px solid var(--line);background:rgba(0,0,0,.3);color:var(--fg);font:inherit;font-size:15px}
+input[type=file]{width:100%;font-size:12px;color:var(--mut)}
+input[type=file]::file-selector-button{min-height:36px;margin-right:10px;padding:0 12px;border-radius:10px;border:1px solid var(--line);background:rgba(255,255,255,.08);color:var(--fg);font:inherit;font-size:14px}
+.row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:44px;cursor:pointer}
+.row small{display:block;margin-top:1px;font-size:12px;line-height:1.35;color:var(--mut)}
+.sw{appearance:none;-webkit-appearance:none;flex:none;position:relative;width:42px;height:24px;margin:0;border-radius:12px;background:rgba(255,255,255,.22);transition:background .15s}
+.sw::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:transform .15s}
+.sw:checked{background:var(--acc)}
+.sw:checked::after{transform:translateX(18px)}
+.lr{display:flex;justify-content:space-between}
+input[type=range]{width:100%;accent-color:var(--acc)}
+.sc{padding:8px 0;border-top:1px solid var(--line);font-size:13px}
+.sc:first-child{border-top:0}
+.sc .vals{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin-top:6px;text-align:center}
+.sc .vals i{font-style:normal;padding:4px 0;border-radius:8px;background:rgba(255,255,255,.07)}
+.sc .vals small{display:block;font-size:10px;color:var(--mut)}
+.sc .st,#stat>.st{margin-top:4px;font-size:12px;color:var(--mut)}
+#msg{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(12px + var(--sb));max-width:min(92vw,520px);padding:6px 12px;border-radius:12px;background:rgba(24,27,36,.72);text-align:center;font-size:13px;line-height:1.4;pointer-events:none}
+#msg:empty{display:none}
+.exg{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:6px}
+.exg .btn{padding:0 4px;font-size:13px;white-space:nowrap}
+#ui select{width:100%;height:40px;border-radius:10px;border:1px solid var(--line);background:rgba(0,0,0,.3);color:var(--fg);font:inherit;font-size:14px;padding:0 8px}
+</style>
+</head>
+<body>
+<div id="top"><button id="tg" class="ib" aria-label="Menu">☰</button></div>
+<div id="ui" class="open">
+  <div class="sec"><h3>Model</h3><div class="stack">
+    <label class="fld">File model<input id="files" type="file" multiple></label>
+    <p class="hint" style="margin:0">Pilih Xavier.pmx, lalu isi folder tex, lalu isi folder spa. Boleh dipilih bertahap.</p>
+    <button id="go" class="btn pri">Muat model</button></div></div>
+  <div class="sec"><h3>Gerakan</h3><div class="stack">
+    <label class="fld">File gerakan (.vmd)<input id="vmd" type="file" accept=".vmd"></label>
+    <button id="stop" class="btn">Hentikan gerakan</button></div></div>
+  <div class="sec"><h3>Ekspresi</h3>
+    <div class="exg" id="exg"><button class="btn" data-ex="smile">😊 Senyum</button><button class="btn" data-ex="happy">😆 Senang</button><button class="btn" data-ex="angry">😠 Marah</button><button class="btn" data-ex="sad">😢 Sedih</button><button class="btn" data-ex="cry">😭 Nangis</button><button class="btn" data-ex="pout">😒 Cemberut</button><button class="btn" data-ex="annoyed">😤 Kesal</button><button class="btn" data-ex="lazy">😑 Malas</button><button class="btn" data-ex="side">🙄 Side eye</button><button class="btn" data-ex="shock">😲 Kaget</button><button class="btn" data-ex="shy">😳 Malu</button><button class="btn" data-ex="smug">😏 Songong</button><button class="btn" data-ex="wink">😉 Kedip</button><button class="btn" data-ex="confused">🤔 Bingung</button><button class="btn" data-ex="normal">😐 Normal</button></div>
+    <label class="row"><span>Kembali normal otomatis<small>Setelah 8 detik</small></span><input id="exauto" type="checkbox" class="sw"></label>
+    <div class="pair" style="margin-top:6px"><button id="exdir" class="btn">↔ Balik arah lirik</button><button id="exdbg" class="btn">🔧 Tes morph</button></div>
+    <div id="exlab" class="stack" style="display:none;margin-top:8px"><select id="exm" aria-label="Pilih morph"></select>
+      <input id="exmv" type="range" min="0" max="1" step="0.05" value="0" aria-label="Nilai morph">
+      <div class="pair"><button id="excopy" class="btn">Salin daftar morph</button><button id="exrst" class="btn">Reset tes</button></div></div>
+    <p class="hint" id="exinfo">Ekspresi berlaku untuk karakter yang sedang dipilih.</p></div>
+  <div class="sec"><h3>Interaksi</h3>
+    <div class="pair"><button id="nod" class="btn">Angguk 🙂</button><button id="greet" class="btn">Sapa 👋</button></div>
+    <label class="row"><span>Idle</span><input id="idle" type="checkbox" class="sw" checked></label><label class="row"><span>Kepala ikut jari</span><input id="follow" type="checkbox" class="sw" checked></label>
+    <div class="fld" style="margin-top:6px"><div class="lr"><span>Sudut lengan</span><output id="armv">0.90</output></div>
+    <input id="arm" type="range" min="-1.6" max="1.6" step="0.05" value="0.9" aria-label="Sudut lengan"></div></div>
+</div>
+<div id="msg">Pilih Xavier.pmx, tekstur, lalu tekan Muat model.</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { MMDLoader } from 'three/addons/loaders/MMDLoader.js';
+import { MMDAnimationHelper } from 'three/addons/animation/MMDAnimationHelper.js';
+
+const msg = document.getElementById('msg');
+document.getElementById('tg').onclick = () => document.getElementById('ui').classList.toggle('open');
+const armV = document.getElementById('armv'); document.getElementById('arm').addEventListener('input', (e) => { armV.textContent = (+e.target.value).toFixed(2); });
+
+// Renderer, scene, camera
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x20232b);
+const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.1, 2000);
+camera.position.set(0, 14, 45);
+
+scene.add(new THREE.AmbientLight(0xffffff, 1.6));
+const dir = new THREE.DirectionalLight(0xffffff, 1.2);
+dir.position.set(-1, 2, 2);
+scene.add(dir);
+scene.add(new THREE.GridHelper(40, 20, 0x555a66, 0x333845));
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 10, 0);
+controls.update();
+
+// Texture path fix: model expects tex\*.png and spa\*.bmp,
+// but files are in one folder and some are .jpg. Flatten + remap.
+const fileMap = {};   // nama file (huruf kecil) -> blob URL
+const manager = new THREE.LoadingManager();
+manager.setURLModifier((url) => {
+  if (url.startsWith('data:')) return url;
+  let name = decodeURIComponent(url.split(/[\\/]/).pop()).toLowerCase();
+  if (fileMap[name]) return fileMap[name];
+  const alt = name.replace(/\.bmp$/, '.jpg');
+  if (fileMap[alt]) return fileMap[alt];
+  return url;
+});
+
+const loader = new MMDLoader(manager);
+const helper = new MMDAnimationHelper({ afterglow: 2.0 });
+const clock = new THREE.Clock();
+
+let mesh = null, bones = {}, morph = {}, vmdActive = false;
+
+function loadModel(pmxUrl) {
+loader.load(pmxUrl, (m) => {
+  mesh = m;
+  scene.add(mesh);
+  helper.add(mesh, { physics: false });   // pasang helper tanpa animasi dulu
+  const find = (n) => mesh.skeleton.getBoneByName(n);
+  bones = {
+    head: find('頭'), neck: find('首'), upper: find('上半身'),
+    lArm: find('左腕'), rArm: find('右腕'),
+  };
+  morph = mesh.morphTargetDictionary || {};
+  HPC.ex = null;
+  // sesuaikan kamera dengan tinggi model
+  const box = new THREE.Box3().setFromObject(mesh);
+  const h = box.max.y - box.min.y;
+  controls.target.set(0, h * 0.55, 0);
+  camera.position.set(0, h * 0.6, h * 2.4);
+  controls.update();
+  msg.textContent = 'Gerakkan jari di layar: kepala mengikuti. Ketuk modelnya untuk menyapa.'; document.getElementById('ui').classList.remove('open');
+}, (e) => {
+  if (e.lengthComputable) msg.textContent = 'Memuat… ' + Math.round(e.loaded / e.total * 100) + '%';
+}, (err) => {
+  console.error(err);
+  msg.textContent = 'Gagal memuat model: ' + (err && err.message ? err.message : err);
+});
+}
+
+let pmxUrl = null, nFiles = 0;
+document.getElementById('files').addEventListener('change', (ev) => {
+  for (const f of ev.target.files) {
+    const u = URL.createObjectURL(f);
+    fileMap[f.name.toLowerCase()] = u;
+    if (/\.pmx$/i.test(f.name)) pmxUrl = u + '#.pmx';   // MMDLoader butuh ekstensi di URL
+    nFiles++;
+  }
+  ev.target.value = '';   // supaya bisa pilih lagi dari folder lain
+  msg.textContent = nFiles + ' file terpilih' + (pmxUrl ? ' (pmx sudah ada)' : ' (pmx belum ada)') +
+    '. Tambah dari folder lain, atau tekan Muat model.';
+});
+
+document.getElementById('go').onclick = () => {
+  if (!pmxUrl) { msg.textContent = 'Pilih dulu Xavier.pmx.'; return; }
+  if (mesh) { scene.remove(mesh); helper.remove(mesh); mesh = null; }
+  msg.textContent = 'Memuat model…';
+  loadModel(pmxUrl);
+};
+
+// Load VMD dari file picker
+document.getElementById('vmd').addEventListener('change', (ev) => {
+  const f = ev.target.files[0];
+  if (!f || !mesh) return;
+  const url = URL.createObjectURL(f) + '#.vmd';
+  msg.textContent = 'Memuat gerakan…';
+  loader.loadAnimation(url, mesh, (clip) => {
+    helper.remove(mesh);
+    helper.add(mesh, { animation: clip, physics: false });
+    vmdActive = true;
+    document.getElementById('idle').checked = false;
+    msg.textContent = 'Gerakan berjalan.';
+  }, undefined, (e) => { console.error(e); msg.textContent = 'Gagal memuat VMD.'; });
+});
+
+document.getElementById('stop').onclick = () => {
+  if (!mesh) return;
+  helper.remove(mesh);
+  mesh.skeleton.pose();
+  helper.add(mesh, { physics: false });
+  vmdActive = false;
+  document.getElementById('idle').checked = true;
+};
+
+// Animasi idle sederhana (napas, goyang kepala, kedip)
+const armSlider = document.getElementById('arm');
+const idleBox = document.getElementById('idle');
+let blinkT = 0;
+
+// Angguk: ubah ke -1 kalau kepala malah mendongak
+const NOD_DIR = 1;
+let nodStart = -1;               // waktu mulai angguk (detik)
+const NOD_TIMES = 2;             // berapa kali mengangguk
+const NOD_SPEED = 2.2;           // detik per angguk
+document.getElementById('nod').onclick = () => {
+  if (vmdActive) return;
+  document.getElementById('idle').checked = true;
+  nodStart = clock.elapsedTime;
+};
+
+function nodAmount(t) {
+  if (nodStart < 0) return 0;
+  const p = (t - nodStart) / NOD_SPEED;      // progres dalam satuan angguk
+  if (p >= NOD_TIMES) { nodStart = -1; return 0; }
+  // 0 -> 1 -> 0 halus per angguk
+  return Math.pow(Math.sin(Math.PI * (p % 1)), 2);
+}
+
+// ---------- Interaktif: kepala ikut jari, ketuk model = menyapa ----------
+const followBox = document.getElementById('follow');
+const LOOK_X_DIR = 1;   // balik ke -1 kalau kepala menoleh ke arah yang berlawanan
+const LOOK_Y_DIR = 1;   // balik ke -1 kalau naik-turunnya terbalik
+let ptr = { x: 0, y: 0, last: -99 };       // posisi sentuhan (-1..1) dan waktu terakhir
+let look = { x: 0, y: 0 };                 // arah pandang yang dihaluskan
+let wander = { x: 0, y: 0, next: 0 };      // arah acak saat tidak disentuh
+
+function setControls() { controls.enableRotate = !followBox.checked; controls.enablePan = !followBox.checked; }
+followBox.addEventListener('change', setControls);
+setControls();
+
+renderer.domElement.addEventListener('pointermove', (e) => {
+  ptr.x = (e.clientX / innerWidth) * 2 - 1;
+  ptr.y = (e.clientY / innerHeight) * 2 - 1;
+  ptr.last = clock.elapsedTime;
+});
+
+// Ketuk model -> sapa
+const ray = new THREE.Raycaster();
+let downAt = null;
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  downAt = { x: e.clientX, y: e.clientY, t: performance.now() };
+  ptr.x = (e.clientX / innerWidth) * 2 - 1;
+  ptr.y = (e.clientY / innerHeight) * 2 - 1;
+  ptr.last = clock.elapsedTime;
+});
+renderer.domElement.addEventListener('pointerup', (e) => {
+  if (!downAt || !mesh) return;
+  const moved = Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y);
+  const quick = performance.now() - downAt.t < 400;
+  downAt = null;
+  if (moved > 10 || !quick) return;
+  ray.setFromCamera(new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1), camera);
+  if (ray.intersectObject(mesh, true).length) greet();
+});
+
+// Sapaan = angguk + lambaikan tangan kanan
+const WAVE_DUR = 2.6;
+let waveStart = -1;
+function greet() {
+  if (vmdActive) return;
+  idleBox.checked = true;
+  nodStart = clock.elapsedTime;
+  waveStart = clock.elapsedTime;
+}
+document.getElementById('greet').onclick = greet;
+
+function waveAmount(t) {
+  if (waveStart < 0) return 0;
+  const p = (t - waveStart) / WAVE_DUR;
+  if (p >= 1) { waveStart = -1; return 0; }
+  return Math.min(1, Math.sin(Math.PI * p) * 2.2);   // naik cepat, turun pelan
+}
+
+function idle(t, dt) {
+  const { head, neck, upper, lArm, rArm } = bones;
+  const nod = nodAmount(t) * NOD_DIR;
+
+  // arah pandang: ikut jari kalau baru disentuh, kalau tidak melirik acak pelan
+  let tx = 0, ty = 0;
+  if (followBox.checked && t - ptr.last < 4) { tx = ptr.x; ty = ptr.y * 0.6; }
+  else {
+    if (t > wander.next) { wander.x = (Math.random() - 0.5) * 0.9; wander.y = (Math.random() - 0.5) * 0.4; wander.next = t + 2 + Math.random() * 4; }
+    tx = wander.x; ty = wander.y;
+  }
+  const k = 1 - Math.exp(-6 * dt);
+  look.x += (tx - look.x) * k;
+  look.y += (ty - look.y) * k;
+  const lx = look.x * LOOK_X_DIR, ly = look.y * LOOK_Y_DIR;
+
+  if (upper) upper.rotation.x = Math.sin(t * 1.6) * 0.02 + nod * 0.08;
+  if (neck) { neck.rotation.y = lx * 0.25; neck.rotation.x = ly * 0.1 + nod * 0.15; }
+  if (head) { head.rotation.z = 0; head.rotation.y = lx * 0.45; head.rotation.x = ly * 0.25 + Math.sin(t * 0.9) * 0.02 + nod * 0.3; }
+
+  const a = parseFloat(armSlider.value);
+  const w = waveAmount(t);
+  if (lArm) lArm.rotation.z = a;
+  if (rArm) rArm.rotation.z = -a + w * (a + 0.9) + Math.sin(t * 11) * 0.12 * w;
+
+  const bi = morph['まばたき'];
+  if (bi !== undefined) {
+    blinkT = (t % 4);
+    mesh.morphTargetInfluences[bi] = blinkT > 3.8 ? 1 : 0;
+  }
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const HPC = { get mesh() { return mesh; }, get morph() { return morph; }, get bones() { return bones; }, name: 'Xavier', ex: null };
+const EX_TARGET = () => HPC, EX_SAY = (m) => { msg.textContent = m; }, exGate = () => (vmdActive || !idleBox.checked) ? 0 : 1;
+
+// ---------- Ekspresi wajah (marah, sedih, nangis, cemberut, dll) ----------
+const EX_LABEL = {smile:'Senyum',happy:'Senang',angry:'Marah',sad:'Sedih',cry:'Nangis',pout:'Cemberut',annoyed:'Kesal',lazy:'Malas',side:'Side eye',shock:'Kaget',shy:'Malu',smug:'Songong',wink:'Kedip',confused:'Bingung',normal:'Normal'};
+const EX_EYE_DIR = 1;   // ubah ke -1 kalau lirikan mata terbalik arahnya
+const EX_ALIAS = {
+  angry: ['怒り', 'angry'], sad: ['悲しい', 'sad'], trouble: ['困る', '困り'], smile: ['にこり', '笑顔', 'smile'], laugh: ['笑い', 'laugh'],
+  half: ['ジト目', 'じと目', 'ジト', '半目'], tear: ['涙', '泣き', 'なみだ'], shock: ['びっくり', '驚き', '驚く'],
+  mUp: ['口角上げ', 'にっこり', 'にやり'], mDown: ['口角下げ', 'への字', 'への字口'], pout: ['ω', 'ω□', 'むくれ', 'ぷくー', '口をすぼめる'],
+  smirk: ['にやり', 'ニヤリ'], blink: ['まばたき'], winkR: ['ウィンク右', 'ウィンク2右'], blush: ['照れ', '頬染め', '赤面', 'はぅ'],
+  pupil: ['瞳小', '瞳縮小']
+};
+const EX_FB = { half: ['blink', 0.55], laugh: ['smile', 1], trouble: ['sad', 0.8], sad: ['trouble', 0.8], mDown: ['sad', 0.35], mUp: ['smile', 0.5], smirk: ['smile', 0.4], blush: ['smile', 0.3] };
+// w = bobot morph, p = pose (hx kepala+ = menunduk, hy toleh, hz miring, nx leher, ux badan), eye = lirik mata, m = mulut terbuka, fx = gerak kecil
+const EX = {
+  normal: {},
+  smile: { w: { smile: 0.8, mUp: 0.5 }, p: { hx: -0.03, hz: 0.04 } },
+  happy: { w: { laugh: 1, mUp: 0.8, smile: 0.3 }, m: 0.5, p: { hx: -0.06 }, fx: 'bounce' },
+  angry: { w: { angry: 1, mDown: 0.7 }, p: { hx: 0.12, nx: 0.05 }, fx: 'tremble' },
+  sad: { w: { sad: 0.9, trouble: 0.7, mDown: 0.6 }, p: { hx: 0.3, nx: 0.12, ux: 0.1 }, fx: 'sway' },
+  cry: { w: { sad: 1, trouble: 0.8, tear: 1, mDown: 0.4, blink: 0.3 }, m: 0.45, p: { hx: 0.3, nx: 0.1, ux: 0.12 }, fx: 'sob' },
+  pout: { w: { angry: 0.3, trouble: 0.35, pout: 0.9, mDown: 0.4 }, p: { hx: 0.06, hy: 0.3, hz: 0.08 }, eye: 0.4 },
+  annoyed: { w: { angry: 0.55, half: 0.6, mDown: 0.6 }, p: { hx: -0.08, nx: -0.04 }, fx: 'huff' },
+  lazy: { w: { half: 1, mDown: 0.15 }, p: { hx: 0.22, nx: 0.08, ux: 0.08, hz: 0.1 }, fx: 'lazy' },
+  side: { w: { half: 0.65, mDown: 0.25 }, p: { hx: -0.04, hz: 0.05 }, eye: 0.55 },
+  shock: { w: { shock: 1, pupil: 0.7 }, m: 0.6, p: { hx: -0.14, ux: -0.05 } },
+  shy: { w: { blush: 1, trouble: 0.45, smile: 0.3 }, p: { hx: 0.2, hy: 0.25, hz: -0.1 }, eye: 0.25 },
+  smug: { w: { smirk: 1, half: 0.35, mUp: 0.5 }, p: { hx: -0.1, hz: -0.1 } },
+  wink: { w: { winkR: 1, smile: 0.4, mUp: 0.6 }, p: { hz: 0.1 } },
+  confused: { w: { trouble: 0.8, mDown: 0.2 }, p: { hz: 0.14, hx: 0.04 } }
+};
+const EX_VOW1 = 'あ';
+function exInit(c) {
+  const f = (n) => c.mesh.skeleton.getBoneByName(n), both = f('両目');
+  c.ex = { id: 'normal', dir: 1, until: 0, map: {}, cur: {}, fx: '', fxw: 0, eyeOn: false,
+    eyes: both ? [both] : [f('左目'), f('右目')].filter(Boolean), P: { hx: 0, hy: 0, hz: 0, nx: 0, ux: 0, eye: 0, m: 0 } };
+  c.ex.shared = new Set([c.morph['まばたき'], c.morph['あ'], c.morph['い'], c.morph['う'], c.morph['え'], c.morph['お']].filter(i => i !== undefined));
+}
+function exIdx(c, key) {
+  const m = c.ex.map; if (key in m) return m[key];
+  let r; for (const n of EX_ALIAS[key]) if (c.morph[n] !== undefined) { r = c.morph[n]; break; }
+  if (r === undefined) for (const n of EX_ALIAS[key]) { if (n.length < 2) continue; const k = Object.keys(c.morph).find(x => x.includes(n)); if (k) { r = c.morph[k]; break; } }
+  return m[key] = r;
+}
+function exSet(c, id, t) {
+  if (!c.ex) exInit(c);
+  c.ex.id = id; c.ex.until = (document.getElementById('exauto').checked && id !== 'normal') ? t + 8 : 0;
+  const miss = [], w = (EX[id] || {}).w || {};
+  for (const key in w) { const fb = EX_FB[key]; if (exIdx(c, key) === undefined && (!fb || exIdx(c, fb[0]) === undefined)) miss.push(EX_ALIAS[key][0]); }
+  document.getElementById('exinfo').textContent = miss.length ? 'Morph tidak ada di model ini: ' + miss.join(', ') + '. Pakai 🔧 Tes morph untuk cari nama yang cocok.' : 'Ekspresi: ' + EX_LABEL[id];
+}
+function exApply(c, t, dt) {
+  const e = c.ex; if (!e || !c.mesh) return;
+  if (e.until && t > e.until) { e.id = 'normal'; e.until = 0; }
+  const pr = EX[e.id] || EX.normal, k = 1 - Math.exp(-7 * dt), inf = c.mesh.morphTargetInfluences, tgt = {};
+  if (pr.w) for (const key in pr.w) {
+    let i = exIdx(c, key), v = pr.w[key]; const fb = EX_FB[key];
+    if (i === undefined && fb) { i = exIdx(c, fb[0]); v *= fb[1]; }
+    if (i !== undefined) tgt[i] = Math.max(tgt[i] || 0, v);
+  }
+  for (const i in tgt) if (!(i in e.cur)) e.cur[i] = 0;
+  for (const i in e.cur) {
+    const v = e.cur[i] += ((tgt[i] || 0) - e.cur[i]) * k, sh = e.shared.has(+i);
+    inf[i] = sh ? Math.max(inf[i], v) : v;
+    if (v < 0.003 && !(i in tgt)) { if (!sh) inf[i] = 0; delete e.cur[i]; }
+  }
+  // pose kepala/badan dan lirikan mata
+  const P = e.P, tp = pr.p || {}, d = e.dir, hasEye = e.eyes.length > 0;
+  const T = { hx: tp.hx || 0, hy: (tp.hy || 0) * d + (hasEye ? 0 : (pr.eye || 0) * d * 0.6), hz: tp.hz || 0, nx: tp.nx || 0, ux: tp.ux || 0, eye: (pr.eye || 0) * d, m: pr.m || 0 };
+  for (const key in P) P[key] += (T[key] - P[key]) * k;
+  if (pr.fx) e.fx = pr.fx;
+  e.fxw += ((e.id === 'normal' ? 0 : 1) - e.fxw) * k;
+  const F = e.fxw; let h0 = 0, h1 = 0, h2 = 0, u0 = 0, ma = 0;
+  switch (e.fx) {
+    case 'tremble': h1 = Math.sin(t * 25) * 0.03; break;
+    case 'sob': { const s = Math.max(0, Math.sin(t * 7)); u0 = s * 0.04; h0 = s * 0.05; h2 = Math.sin(t * 14) * 0.015; ma = 0.3 * s; break; }
+    case 'sway': h2 = Math.sin(t * 0.8) * 0.03; break;
+    case 'bounce': u0 = Math.sin(t * 5) * 0.03; h2 = Math.sin(t * 2.5) * 0.06; break;
+    case 'huff': { const s = Math.pow(Math.max(0, Math.sin(t * 1.3)), 8); h1 = Math.sin(t * 14) * 0.05 * s; u0 = -0.03 * s; break; }
+    case 'lazy': h2 = Math.sin(t * 0.6) * 0.05; h0 = Math.sin(t * 0.5) * 0.03; break;
+  }
+  const mi = c.morph[EX_VOW1], mv = P.m + ma * F;
+  if (mi !== undefined && mv > 0.003) inf[mi] = Math.max(inf[mi], mv);
+  const g = exGate(c);
+  if (g > 0) {
+    const { head, neck, upper } = c.bones;
+    if (head) { head.rotation.x += (P.hx + h0 * F) * g; head.rotation.y += (P.hy + h1 * F) * g; head.rotation.z += (P.hz + h2 * F) * g; }
+    if (neck) neck.rotation.x += P.nx * g;
+    if (upper) upper.rotation.x += (P.ux + u0 * F) * g;
+  }
+  const on = Math.abs(P.eye) > 0.001;
+  if (on || e.eyeOn) { for (const b of e.eyes) b.rotation.y = on ? P.eye * 0.5 * EX_EYE_DIR : 0; e.eyeOn = on; }
+}
+// ---------- UI ekspresi ----------
+document.getElementById('exg').addEventListener('click', (ev) => {
+  const b = ev.target.closest('button[data-ex]'); if (!b) return;
+  const c = EX_TARGET(); if (!c || !c.mesh) { EX_SAY('Muat karakter dulu.'); return; }
+  exSet(c, b.dataset.ex, clock.elapsedTime); EX_SAY((c.name || 'Karakter') + ': ' + EX_LABEL[b.dataset.ex]);
+});
+document.getElementById('exdir').onclick = () => { const c = EX_TARGET(); if (!c || !c.mesh) return; if (!c.ex) exInit(c); c.ex.dir *= -1; EX_SAY('Arah lirik: ' + (c.ex.dir > 0 ? 'kanan layar' : 'kiri layar')); };
+const exM = document.getElementById('exm'), exMV = document.getElementById('exmv');
+function exFill() {
+  const c = EX_TARGET(); if (!c || !c.mesh) { exM.innerHTML = ''; return; }
+  const cur = exM.value; exM.innerHTML = '';
+  for (const n of Object.keys(c.morph)) { const o = document.createElement('option'); o.value = n; o.textContent = n; exM.appendChild(o); }
+  if (cur && c.morph[cur] !== undefined) exM.value = cur;
+  exSync();
+}
+function exSync() { const c = EX_TARGET(); if (c && c.mesh && c.morph[exM.value] !== undefined) exMV.value = c.mesh.morphTargetInfluences[c.morph[exM.value]] || 0; }
+document.getElementById('exdbg').onclick = () => { const lab = document.getElementById('exlab'); lab.style.display = lab.style.display === 'none' ? 'grid' : 'none'; if (lab.style.display !== 'none') exFill(); };
+exM.addEventListener('change', exSync);
+exMV.addEventListener('input', () => { const c = EX_TARGET(); if (!c || !c.mesh) return; const i = c.morph[exM.value]; if (i === undefined) return; c.mesh.morphTargetInfluences[i] = +exMV.value; if (!c.exLab) c.exLab = new Set(); c.exLab.add(i); });
+document.getElementById('exrst').onclick = () => { const c = EX_TARGET(); if (!c || !c.mesh) return; (c.exLab || []).forEach(i => { c.mesh.morphTargetInfluences[i] = 0; }); if (c.exLab) c.exLab.clear(); exMV.value = 0; };
+document.getElementById('excopy').onclick = () => { const c = EX_TARGET(); if (!c || !c.mesh) return; const txt = Object.keys(c.morph).join('\n'); try { navigator.clipboard.writeText(txt).then(() => EX_SAY('Daftar morph disalin (' + Object.keys(c.morph).length + ')'), () => { console.log(txt); EX_SAY('Gagal menyalin, daftar ada di console'); }); } catch (e) { console.log(txt); EX_SAY('Gagal menyalin, daftar ada di console'); } };
+
+function tick() {
+  requestAnimationFrame(tick);
+  const dt = clock.getDelta();
+  if (mesh) {
+    if (!vmdActive && idleBox.checked) idle(clock.elapsedTime, dt);
+    exApply(HPC, clock.elapsedTime, dt);
+    helper.update(dt);
+  }
+  controls.update();
+  renderer.render(scene, camera);
+}
+tick();
+</script>
+</body>
+</html>
